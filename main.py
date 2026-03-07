@@ -48,7 +48,7 @@ def _serialize_group_templates(templates: dict) -> str:
     "group_welcome",
     "YourName",
     "入群欢迎插件：支持 OneBot 协议下的 @新成员、AI 个性化欢迎、群人数统计及黑白名单。",
-    "4.1.8",
+    "1.0.8",
 )
 class GroupWelcomePlugin(Star):
     # 类属性：全局冷却记录
@@ -498,3 +498,4 @@ AI 个性欢迎：{"✅ 开启" if self._enable_ai_welcome else "🔕 关闭"}
 {"─" * 24}
 {tip}"""
         yield event.plain_result(result)
+
