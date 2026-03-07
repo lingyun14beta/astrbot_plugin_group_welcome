@@ -1,14 +1,16 @@
 import json
 import time
-import os
 import asyncio
+# 1. 移除 os 模块中不必要的路径操作，保留 os 用于其他可能的用途（虽然这里用 pathlib 替代了大部分）
+import os 
 from astrbot.api.event import filter, AstrMessageEvent
-from astrbot.api.star import Context, Star, register
+# 2. 引入 StarTools
+from astrbot.api.star import Context, Star, register, StarTools
 from astrbot.api import logger, AstrBotConfig
 
-# 使用插件所在目录的绝对路径，确保文件读写安全
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-COOLDOWN_FILE = os.path.join(BASE_DIR, "cooldowns.json")
+# 【已删除】硬编码的 BASE_DIR 和 COOLDOWN_FILE
+# BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+# COOLDOWN_FILE = os.path.join(BASE_DIR, "cooldowns.json")
 
 def _parse_id_list(value) -> set:
     """解析逗号分隔的群号字符串为集合。"""
@@ -71,6 +73,10 @@ class GroupWelcomePlugin(Star):
         self._whitelist: set = _parse_id_list(config.get("group_whitelist", ""))
         self._blacklist: set = _parse_id_list(config.get("group_blacklist", ""))
 
+        # 【修正】使用 StarTools 获取规范的数据存储路径
+        # StarTools.get_data_dir() 返回的是 pathlib.Path 对象
+        self.cooldown_file = StarTools.get_data_dir() / "cooldowns.json"
+
         # 加载持久化的冷却数据
         self._load_cooldowns()
 
@@ -91,7 +97,6 @@ class GroupWelcomePlugin(Star):
             if client:
                 try:
                     # 获取 OneBot 适配器的原始 bot 对象进行事件监听
-                    # 注意：这依赖于 client 暴露 on_notice 装饰器
                     if hasattr(client, "on_notice"):
                         @client.on_notice("group_increase")
                         async def _group_increase_handler(event):
@@ -101,7 +106,6 @@ class GroupWelcomePlugin(Star):
                         logger.info("[group_welcome] OneBot 11 入群事件监听已成功注册。")
                         return
                     else:
-                        # 尝试兼容其他适配器结构，或等待加载
                         pass
                 except Exception as e:
                     logger.error(f"[group_welcome] 注册监听失败: {e}")
@@ -122,10 +126,12 @@ class GroupWelcomePlugin(Star):
 
     def _load_cooldowns(self):
         """从文件加载冷却数据。"""
-        if not os.path.exists(COOLDOWN_FILE):
+        # 使用 pathlib 的 .exists() 方法
+        if not self.cooldown_file.exists():
             return
         try:
-            with open(COOLDOWN_FILE, 'r', encoding='utf-8') as f:
+            # 直接传入 Path 对象给 open()
+            with open(self.cooldown_file, 'r', encoding='utf-8') as f:
                 data = json.load(f)
                 now = time.time()
                 count = 0
@@ -140,7 +146,7 @@ class GroupWelcomePlugin(Star):
     def _save_cooldowns(self):
         """保存冷却数据到文件。"""
         try:
-            with open(COOLDOWN_FILE, 'w', encoding='utf-8') as f:
+            with open(self.cooldown_file, 'w', encoding='utf-8') as f:
                 json.dump(GroupWelcomePlugin._global_cooldown, f)
         except Exception as e:
             logger.warning(f"[group_welcome] 保存冷却数据失败: {e}")
