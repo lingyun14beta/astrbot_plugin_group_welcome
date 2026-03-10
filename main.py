@@ -1,16 +1,10 @@
 import json
 import time
 import asyncio
-# 1. 移除 os 模块中不必要的路径操作，保留 os 用于其他可能的用途（虽然这里用 pathlib 替代了大部分）
 import os 
 from astrbot.api.event import filter, AstrMessageEvent
-# 2. 引入 StarTools
 from astrbot.api.star import Context, Star, register, StarTools
 from astrbot.api import logger, AstrBotConfig
-
-# 【已删除】硬编码的 BASE_DIR 和 COOLDOWN_FILE
-# BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-# COOLDOWN_FILE = os.path.join(BASE_DIR, "cooldowns.json")
 
 def _parse_id_list(value) -> set:
     """解析逗号分隔的群号字符串为集合。"""
@@ -48,7 +42,7 @@ def _serialize_group_templates(templates: dict) -> str:
     "group_welcome",
     "YourName",
     "入群欢迎插件：支持 OneBot 协议下的 @新成员、AI 个性化欢迎、群人数统计及黑白名单。",
-    "1.0.8",
+    "1.0.9",
 )
 class GroupWelcomePlugin(Star):
     # 类属性：全局冷却记录
@@ -73,8 +67,6 @@ class GroupWelcomePlugin(Star):
         self._whitelist: set = _parse_id_list(config.get("group_whitelist", ""))
         self._blacklist: set = _parse_id_list(config.get("group_blacklist", ""))
 
-        # 【修正】使用 StarTools 获取规范的数据存储路径
-        # StarTools.get_data_dir() 返回的是 pathlib.Path 对象
         self.cooldown_file = StarTools.get_data_dir() / "cooldowns.json"
 
         # 加载持久化的冷却数据
@@ -96,7 +88,6 @@ class GroupWelcomePlugin(Star):
             client = self._get_client()
             if client:
                 try:
-                    # 获取 OneBot 适配器的原始 bot 对象进行事件监听
                     if hasattr(client, "on_notice"):
                         @client.on_notice("group_increase")
                         async def _group_increase_handler(event):
@@ -105,8 +96,6 @@ class GroupWelcomePlugin(Star):
                         
                         logger.info("[group_welcome] OneBot 11 入群事件监听已成功注册。")
                         return
-                    else:
-                        pass
                 except Exception as e:
                     logger.error(f"[group_welcome] 注册监听失败: {e}")
             
@@ -126,11 +115,9 @@ class GroupWelcomePlugin(Star):
 
     def _load_cooldowns(self):
         """从文件加载冷却数据。"""
-        # 使用 pathlib 的 .exists() 方法
         if not self.cooldown_file.exists():
             return
         try:
-            # 直接传入 Path 对象给 open()
             with open(self.cooldown_file, 'r', encoding='utf-8') as f:
                 data = json.load(f)
                 now = time.time()
@@ -156,14 +143,17 @@ class GroupWelcomePlugin(Star):
     # ──────────────────────────────────────────
 
     def _get_client(self):
+        """
+        【修复】使用鸭子类型判断适配器是否可用，
+        避免依赖类名字符串匹配导致的脆弱性。
+        只要适配器拥有 bot 对象且 bot 具备 api 属性，即视为有效客户端。
+        """
         try:
             for adapter in self.context.platform_manager.get_insts():
-                name = adapter.__class__.__name__.lower()
-                if "iocqhttp" in name or "onebot" in name:
-                    if hasattr(adapter, "bot") and adapter.bot:
-                        return adapter.bot
-        except Exception:
-            pass
+                if hasattr(adapter, "bot") and adapter.bot and hasattr(adapter.bot, "api"):
+                    return adapter.bot
+        except Exception as e:
+            logger.debug(f"[group_welcome] _get_client 遍历适配器异常: {e}")
         return None
 
     def _clean_expired_cooldowns(self):
@@ -274,15 +264,22 @@ class GroupWelcomePlugin(Star):
             logger.debug(f"[group_welcome] 私聊发送群规失败: {e}")
 
     async def _gen_ai_welcome(self, name: str) -> str:
+        """
+        【修复】使用 str.replace() 替代 str.format() 进行占位符替换，
+        避免用户配置中出现 {user}、{nickname} 等非预期占位符时触发 KeyError。
+        """
         try:
             provider = self.context.get_using_provider()
             if not provider: return ""
-            prompt_fmt = self.config.get("ai_welcome_prompt", "请根据以下昵称，生成一句简短、温暖、有趣的入群欢迎语：{name}")
-            
-            try:
-                final_prompt = prompt_fmt.format(name=name)
-            except Exception as e:
-                logger.warning(f"[group_welcome] AI 提示词模板格式错误: {e}")
+
+            prompt_fmt = self.config.get(
+                "ai_welcome_prompt",
+                "请根据以下昵称，生成一句简短、温暖、有趣的入群欢迎语：{name}"
+            )
+
+            # 【修复】直接字符串替换，不依赖 format()，彻底规避 KeyError
+            final_prompt = prompt_fmt.replace("{name}", name)
+            if not final_prompt.strip():
                 final_prompt = f"请根据以下昵称，生成一句简短、温暖、有趣的入群欢迎语：{name}"
 
             resp = await provider.text_chat(prompt=final_prompt, session_id=f"gw_{name}")
@@ -498,4 +495,3 @@ AI 个性欢迎：{"✅ 开启" if self._enable_ai_welcome else "🔕 关闭"}
 {"─" * 24}
 {tip}"""
         yield event.plain_result(result)
-
