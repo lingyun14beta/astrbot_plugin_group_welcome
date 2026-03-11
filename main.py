@@ -42,12 +42,9 @@ def _serialize_group_templates(templates: dict) -> str:
     "group_welcome",
     "YourName",
     "入群欢迎插件：支持 OneBot 协议下的 @新成员、AI 个性化欢迎、群人数统计及黑白名单。",
-    "1.0.9",
+    "2.0.0",
 )
 class GroupWelcomePlugin(Star):
-    # 类属性：全局冷却记录
-    _global_cooldown = {}
-    _last_cleanup_time = 0
 
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
@@ -58,6 +55,10 @@ class GroupWelcomePlugin(Star):
         
         # 运行状态标记
         self._is_running = True
+
+        # 【Fix #2】改为实例变量，避免热重载时状态残留
+        self._global_cooldown = {}
+        self._last_cleanup_time = 0
         
         # 配置加载
         self._enable_member_count: bool = config.get("enable_member_count", True)
@@ -72,8 +73,8 @@ class GroupWelcomePlugin(Star):
         # 加载持久化的冷却数据
         self._load_cooldowns()
 
-        # 启动事件监听注册任务
-        asyncio.create_task(self._safe_register_handler())
+        # 【Fix #1】保存 Task 引用，避免 GC 回收 & 支持 terminate() 主动取消
+        self._register_task = asyncio.create_task(self._safe_register_handler())
 
     # ──────────────────────────────────────────
     # 生命周期管理
@@ -106,6 +107,13 @@ class GroupWelcomePlugin(Star):
     async def terminate(self):
         """插件卸载回调。"""
         self._is_running = False
+        # 【Fix #1】主动取消 Task，避免插件卸载后幽灵任务残留
+        if self._register_task and not self._register_task.done():
+            self._register_task.cancel()
+            try:
+                await self._register_task
+            except asyncio.CancelledError:
+                pass
         self._save_cooldowns()
         logger.info("[group_welcome] 插件已卸载，冷却数据已保存。")
 
@@ -124,7 +132,7 @@ class GroupWelcomePlugin(Star):
                 count = 0
                 for k, v in data.items():
                     if now - v < 86400:
-                        GroupWelcomePlugin._global_cooldown[k] = v
+                        self._global_cooldown[k] = v
                         count += 1
                 logger.debug(f"[group_welcome] 已加载 {count} 条有效冷却记录。")
         except Exception as e:
@@ -134,7 +142,7 @@ class GroupWelcomePlugin(Star):
         """保存冷却数据到文件。"""
         try:
             with open(self.cooldown_file, 'w', encoding='utf-8') as f:
-                json.dump(GroupWelcomePlugin._global_cooldown, f)
+                json.dump(self._global_cooldown, f)
         except Exception as e:
             logger.warning(f"[group_welcome] 保存冷却数据失败: {e}")
 
@@ -144,7 +152,7 @@ class GroupWelcomePlugin(Star):
 
     def _get_client(self):
         """
-        【修复】使用鸭子类型判断适配器是否可用，
+        使用鸭子类型判断适配器是否可用，
         避免依赖类名字符串匹配导致的脆弱性。
         只要适配器拥有 bot 对象且 bot 具备 api 属性，即视为有效客户端。
         """
@@ -158,14 +166,14 @@ class GroupWelcomePlugin(Star):
 
     def _clean_expired_cooldowns(self):
         now = time.time()
-        if now - GroupWelcomePlugin._last_cleanup_time < 3600:
+        if now - self._last_cleanup_time < 3600:
             return
         
-        expired = [k for k, ts in GroupWelcomePlugin._global_cooldown.items() if now - ts > 86400]
+        expired = [k for k, ts in self._global_cooldown.items() if now - ts > 86400]
         for key in expired:
-            del GroupWelcomePlugin._global_cooldown[key]
+            del self._global_cooldown[key]
         
-        GroupWelcomePlugin._last_cleanup_time = now
+        self._last_cleanup_time = now
         self._save_cooldowns()
 
     async def _on_notice(self, event):
@@ -189,9 +197,9 @@ class GroupWelcomePlugin(Star):
         
         async with self._lock:
             now = time.time()
-            if now - GroupWelcomePlugin._global_cooldown.get(key, 0) < cooldown:
+            if now - self._global_cooldown.get(key, 0) < cooldown:
                 return
-            GroupWelcomePlugin._global_cooldown[key] = now
+            self._global_cooldown[key] = now
 
         client = self._get_client()
         if not client: return
@@ -265,7 +273,7 @@ class GroupWelcomePlugin(Star):
 
     async def _gen_ai_welcome(self, name: str) -> str:
         """
-        【修复】使用 str.replace() 替代 str.format() 进行占位符替换，
+        使用 str.replace() 替代 str.format() 进行占位符替换，
         避免用户配置中出现 {user}、{nickname} 等非预期占位符时触发 KeyError。
         """
         try:
@@ -277,7 +285,6 @@ class GroupWelcomePlugin(Star):
                 "请根据以下昵称，生成一句简短、温暖、有趣的入群欢迎语：{name}"
             )
 
-            # 【修复】直接字符串替换，不依赖 format()，彻底规避 KeyError
             final_prompt = prompt_fmt.replace("{name}", name)
             if not final_prompt.strip():
                 final_prompt = f"请根据以下昵称，生成一句简短、温暖、有趣的入群欢迎语：{name}"
