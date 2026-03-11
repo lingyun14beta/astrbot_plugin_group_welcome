@@ -11,7 +11,7 @@ desc: 一个普通的群欢迎插件awa
 help: 插件提供丰富的指令，请查看 README.md 获取详细说明，或发送 /welcome status 查看运行状态。
 
 # 插件版本号
-version: 1.0.9
+version: 2.0.0
 
 # 作者名
 author: lingyun
@@ -29,6 +29,7 @@ support_platforms:
 
 # (新增) 声明支持的 AstrBot 版本范围
 astrbot_version: ">=v4.12.0"
+
 
 
 
