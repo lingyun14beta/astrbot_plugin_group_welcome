@@ -7,7 +7,7 @@
   },
   "enable_member_count": {
     "label": "📊 开启群人数统计",
-    "description": "开启后，变量 {count_text} 会被替换为“你是当前群里第 x 位成员！”",
+    "description": "开启后，变量 {count_text} 会被替换为\"你是当前群里第 x 位成员！\"",
     "type": "bool",
     "default": true
   },
@@ -29,7 +29,7 @@
     "type": "bool",
     "default": false
   },
-    "llm_provider": {
+  "llm_provider": {
     "label": "🧠 AI 模型提供商",
     "description": "选择用于生成欢迎语的模型。留空则使用系统默认的当前模型。",
     "type": "string",
@@ -50,15 +50,15 @@
   },
   "group_whitelist": {
     "label": "✅ 白名单群号",
-    "description": "【白名单模式】填写后，只有这些群会触发欢迎。",
-    "type": "string",
-    "default": ""
+    "description": "【白名单模式】填写后，只有这些群会触发欢迎。每行一个群号。",
+    "type": "list",
+    "default": []
   },
   "group_blacklist": {
     "label": "🚫 黑名单群号",
-    "description": "【黑名单模式】只有当白名单为空时生效。",
-    "type": "string",
-    "default": ""
+    "description": "【黑名单模式】只有当白名单为空时生效。每行一个群号。",
+    "type": "list",
+    "default": []
   },
   "group_templates": {
     "label": "💾[系统数据] 群专属配置",
