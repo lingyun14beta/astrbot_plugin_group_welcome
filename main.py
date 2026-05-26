@@ -1,13 +1,13 @@
 import json
 import time
 import asyncio
-import os 
 from astrbot.api.event import filter, AstrMessageEvent
-from astrbot.api.star import Context, Star, register, StarTools
+from astrbot.api.star import Context, Star, StarTools
 from astrbot.api import logger, AstrBotConfig
 
+
 def _parse_id_list(value) -> set:
-    """解析逗号分隔的群号字符串为集合。"""
+    """解析 list 或逗号分隔的群号字符串为集合（兼容旧版字符串格式）。"""
     if isinstance(value, list):
         return set(str(item) for item in value if str(item).strip())
     if not isinstance(value, str):
@@ -15,9 +15,9 @@ def _parse_id_list(value) -> set:
     return set(item.strip() for item in value.split(",") if item.strip())
 
 
-def _serialize_id_list(id_set: set) -> str:
-    """序列化群号集合为字符串。"""
-    return ",".join(sorted(id_set))
+def _serialize_id_list(id_set: set) -> list:
+    """序列化群号集合为列表，与 _conf_schema.json 的 list 类型对应。"""
+    return sorted(id_set)
 
 
 def _parse_group_templates(value) -> dict:
@@ -38,35 +38,31 @@ def _serialize_group_templates(templates: dict) -> str:
     return json.dumps(templates, ensure_ascii=False)
 
 
-@register(
-    "group_welcome",
-    "YourName",
-    "入群欢迎插件：支持 OneBot 协议下的 @新成员、AI 个性化欢迎、群人数统计及黑白名单。",
-    "2.2.0",
-)
 class GroupWelcomePlugin(Star):
-
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
         self.config = config
-        
+
         # 锁初始化 (Python 3.10+ 安全)
         self._lock = asyncio.Lock()
-        
+
         # 运行状态标记
         self._is_running = True
 
         # 【Fix #2】改为实例变量，避免热重载时状态残留
         self._global_cooldown = {}
         self._last_cleanup_time = 0
-        
+
         # 配置加载
         self._enable_member_count: bool = config.get("enable_member_count", True)
         self._enable_private_rules: bool = config.get("enable_private_rules", False)
         self._enable_ai_welcome: bool = config.get("enable_ai_welcome", False)
-        
-        self._whitelist: set = _parse_id_list(config.get("group_whitelist", ""))
-        self._blacklist: set = _parse_id_list(config.get("group_blacklist", ""))
+
+        self._whitelist: set = _parse_id_list(config.get("group_whitelist", []))
+        self._blacklist: set = _parse_id_list(config.get("group_blacklist", []))
+
+        # 迁移旧版字符串格式 → list，避免 UI 把字符串逐字符展开
+        self._migrate_id_lists()
 
         self.cooldown_file = StarTools.get_data_dir() / "cooldowns.json"
 
@@ -84,24 +80,29 @@ class GroupWelcomePlugin(Star):
         """稳健的事件监听注册逻辑。"""
         max_retries = 15
         for _ in range(max_retries):
-            if not self._is_running: return 
-            
+            if not self._is_running:
+                return
+
             client = self._get_client()
             if client:
                 try:
                     if hasattr(client, "on_notice"):
+
                         @client.on_notice("group_increase")
                         async def _group_increase_handler(event):
-                            if not self._is_running: return
+                            if not self._is_running:
+                                return
                             await self._on_notice(event)
-                        
-                        logger.info("[group_welcome] OneBot 11 入群事件监听已成功注册。")
+
+                        logger.info(
+                            "[group_welcome] OneBot 11 入群事件监听已成功注册。"
+                        )
                         return
                 except Exception as e:
                     logger.error(f"[group_welcome] 注册监听失败: {e}")
-            
+
             await asyncio.sleep(5)
-        
+
         logger.warning("[group_welcome] 超时未找到 OneBot 适配器，插件功能可能受限。")
 
     async def terminate(self):
@@ -126,7 +127,7 @@ class GroupWelcomePlugin(Star):
         if not self.cooldown_file.exists():
             return
         try:
-            with open(self.cooldown_file, 'r', encoding='utf-8') as f:
+            with open(self.cooldown_file, "r", encoding="utf-8") as f:
                 data = json.load(f)
                 now = time.time()
                 count = 0
@@ -141,7 +142,7 @@ class GroupWelcomePlugin(Star):
     def _save_cooldowns(self):
         """保存冷却数据到文件。"""
         try:
-            with open(self.cooldown_file, 'w', encoding='utf-8') as f:
+            with open(self.cooldown_file, "w", encoding="utf-8") as f:
                 json.dump(self._global_cooldown, f)
         except Exception as e:
             logger.warning(f"[group_welcome] 保存冷却数据失败: {e}")
@@ -158,7 +159,11 @@ class GroupWelcomePlugin(Star):
         """
         try:
             for adapter in self.context.platform_manager.get_insts():
-                if hasattr(adapter, "bot") and adapter.bot and hasattr(adapter.bot, "api"):
+                if (
+                    hasattr(adapter, "bot")
+                    and adapter.bot
+                    and hasattr(adapter.bot, "api")
+                ):
                     return adapter.bot
         except Exception as e:
             logger.debug(f"[group_welcome] _get_client 遍历适配器异常: {e}")
@@ -168,11 +173,11 @@ class GroupWelcomePlugin(Star):
         now = time.time()
         if now - self._last_cleanup_time < 3600:
             return
-        
+
         expired = [k for k, ts in self._global_cooldown.items() if now - ts > 86400]
         for key in expired:
             del self._global_cooldown[key]
-        
+
         self._last_cleanup_time = now
         self._save_cooldowns()
 
@@ -191,10 +196,10 @@ class GroupWelcomePlugin(Star):
             return
 
         self._clean_expired_cooldowns()
-        
+
         key = f"{group_id}:{user_id}"
         cooldown = self.config.get("cooldown_seconds", 300)
-        
+
         async with self._lock:
             now = time.time()
             if now - self._global_cooldown.get(key, 0) < cooldown:
@@ -202,18 +207,20 @@ class GroupWelcomePlugin(Star):
             self._global_cooldown[key] = now
 
         client = self._get_client()
-        if not client: return
+        if not client:
+            return
 
         name = await self._get_member_name(client, group_id, user_id)
-        
+
         count_text = ""
         if self._enable_member_count:
             count = await self._get_group_member_count(client, group_id)
-            if count: count_text = f"\n你是当前群里第 {count} 位成员！"
+            if count:
+                count_text = f"\n你是当前群里第 {count} 位成员！"
 
         # 生成欢迎语
         template = self._get_welcome_template(group_id)
-        
+
         try:
             welcome_text = template.format(name=name, count_text=count_text)
         except Exception as e:
@@ -222,7 +229,8 @@ class GroupWelcomePlugin(Star):
 
         if self._enable_ai_welcome:
             ai_text = await self._gen_ai_welcome(name)
-            if ai_text: welcome_text += f"\n\n✨ {ai_text}"
+            if ai_text:
+                welcome_text += f"\n\n✨ {ai_text}"
 
         await self._send_group_welcome(client, group_id, user_id, welcome_text)
 
@@ -241,8 +249,14 @@ class GroupWelcomePlugin(Star):
 
     async def _get_member_name(self, client, group_id: str, user_id: str) -> str:
         try:
-            if not group_id.isdigit() or not user_id.isdigit(): return user_id
-            res = await client.api.call_action("get_group_member_info", group_id=int(group_id), user_id=int(user_id), no_cache=True)
+            if not group_id.isdigit() or not user_id.isdigit():
+                return user_id
+            res = await client.api.call_action(
+                "get_group_member_info",
+                group_id=int(group_id),
+                user_id=int(user_id),
+                no_cache=True,
+            )
             return res.get("card") or res.get("nickname") or user_id
         except Exception as e:
             logger.debug(f"[group_welcome] 获取成员信息失败: {e}")
@@ -250,26 +264,40 @@ class GroupWelcomePlugin(Star):
 
     async def _get_group_member_count(self, client, group_id: str):
         try:
-            if not group_id.isdigit(): return None
-            res = await client.api.call_action("get_group_info", group_id=int(group_id), no_cache=True)
+            if not group_id.isdigit():
+                return None
+            res = await client.api.call_action(
+                "get_group_info", group_id=int(group_id), no_cache=True
+            )
             return res.get("member_count")
-        except Exception: return None
+        except Exception:
+            return None
 
     async def _send_group_welcome(self, client, group_id: str, user_id: str, text: str):
         try:
-            if not group_id.isdigit() or not user_id.isdigit(): return
-            message = [{"type": "at", "data": {"qq": user_id}}, {"type": "text", "data": {"text": f" {text}"}}]
-            await client.api.call_action("send_group_msg", group_id=int(group_id), message=message)
-        except Exception as e: logger.error(f"[group_welcome] 发送欢迎语异常: {e}")
+            if not group_id.isdigit() or not user_id.isdigit():
+                return
+            message = [
+                {"type": "at", "data": {"qq": user_id}},
+                {"type": "text", "data": {"text": f" {text}"}},
+            ]
+            await client.api.call_action(
+                "send_group_msg", group_id=int(group_id), message=message
+            )
+        except Exception as e:
+            logger.error(f"[group_welcome] 发送欢迎语异常: {e}")
 
     async def _send_private_rules(self, client, user_id: str):
         await asyncio.sleep(2)
         rules = self.config.get("group_rules", "📋 请遵守群规，友善交流！")
         try:
-            if not user_id.isdigit(): return
-            await client.api.call_action("send_private_msg", user_id=int(user_id), message=rules)
+            if not user_id.isdigit():
+                return
+            await client.api.call_action(
+                "send_private_msg", user_id=int(user_id), message=rules
+            )
         except Exception as e:
-            logger.debug(f"[group_welcome] 私聊发送群规失败: {e}")
+            logger.warning(f"[group_welcome] 私聊发送群规失败: {e}")
 
     async def _gen_ai_welcome(self, name: str) -> str:
         """
@@ -283,24 +311,30 @@ class GroupWelcomePlugin(Star):
                 # 使用官方接口获取指定 Provider
                 provider = self.context.get_provider_by_id(provider_id)
                 if not provider:
-                    logger.warning(f"[group_welcome] 未找到指定的 LLM ({provider_id})，回退到默认模型。")
+                    logger.warning(
+                        f"[group_welcome] 未找到指定的 LLM ({provider_id})，回退到默认模型。"
+                    )
                     provider = self.context.get_using_provider()
             else:
                 provider = self.context.get_using_provider()
-                
-            if not provider: 
+
+            if not provider:
                 return ""
 
             prompt_fmt = self.config.get(
                 "ai_welcome_prompt",
-                "请根据以下昵称，生成一句简短、温暖、有趣的入群欢迎语：{name}"
+                "请根据以下昵称，生成一句简短、温暖、有趣的入群欢迎语：{name}",
             )
 
             final_prompt = prompt_fmt.replace("{name}", name)
             if not final_prompt.strip():
-                final_prompt = f"请根据以下昵称，生成一句简短、温暖、有趣的入群欢迎语：{name}"
+                final_prompt = (
+                    f"请根据以下昵称，生成一句简短、温暖、有趣的入群欢迎语：{name}"
+                )
 
-            resp = await provider.text_chat(prompt=final_prompt, session_id=f"gw_{name}")
+            resp = await provider.text_chat(
+                prompt=final_prompt, session_id=f"gw_{name}"
+            )
             return resp.completion_text.strip()
         except Exception as e:
             logger.warning(f"[group_welcome] AI 生成失败: {e}")
@@ -309,6 +343,22 @@ class GroupWelcomePlugin(Star):
     # ──────────────────────────────────────────
     # 配置辅助
     # ──────────────────────────────────────────
+    def _migrate_id_lists(self) -> None:
+        """若白/黑名单配置仍是旧版字符串，一次性转换为 list 并写回，防止 UI 逐字符展开。"""
+        changed = False
+        for key, id_set in [
+            ("group_whitelist", self._whitelist),
+            ("group_blacklist", self._blacklist),
+        ]:
+            if isinstance(self.config.get(key), str):
+                self.config[key] = _serialize_id_list(id_set)
+                logger.info(
+                    f"[group_welcome] 已将 {key} 从旧版字符串格式迁移为列表格式。"
+                )
+                changed = True
+        if changed:
+            self.config.save_config()
+
     def _save_switches(self):
         self.config["enable_member_count"] = self._enable_member_count
         self.config["enable_private_rules"] = self._enable_private_rules
@@ -358,7 +408,9 @@ class GroupWelcomePlugin(Star):
             yield event.plain_result("🔕 群人数统计已关闭")
         else:
             status = "开启" if self._enable_member_count else "关闭"
-            yield event.plain_result(f"当前群人数统计：{status}\n用法：/welcome count on|off")
+            yield event.plain_result(
+                f"当前群人数统计：{status}\n用法：/welcome count on|off"
+            )
 
     @welcome.command("rules")
     @filter.permission_type(filter.PermissionType.ADMIN)
@@ -374,7 +426,9 @@ class GroupWelcomePlugin(Star):
             yield event.plain_result("🔕 私聊群规已关闭")
         else:
             status = "开启" if self._enable_private_rules else "关闭"
-            yield event.plain_result(f"当前私聊群规：{status}\n用法：/welcome rules on|off")
+            yield event.plain_result(
+                f"当前私聊群规：{status}\n用法：/welcome rules on|off"
+            )
 
     @welcome.command("ai")
     @filter.permission_type(filter.PermissionType.ADMIN)
@@ -390,7 +444,9 @@ class GroupWelcomePlugin(Star):
             yield event.plain_result("🔕 AI 个性化欢迎语已关闭")
         else:
             status = "开启" if self._enable_ai_welcome else "关闭"
-            yield event.plain_result(f"当前 AI 欢迎语：{status}\n用法：/welcome ai on|off")
+            yield event.plain_result(
+                f"当前 AI 欢迎语：{status}\n用法：/welcome ai on|off"
+            )
 
     @welcome.command("set")
     @filter.permission_type(filter.PermissionType.ADMIN)
@@ -400,9 +456,11 @@ class GroupWelcomePlugin(Star):
         parts = raw_msg.split(maxsplit=2)
         text_content = parts[2].strip() if len(parts) > 2 else ""
         text = text_content.replace("｛", "{").replace("｝", "}")
-        
-        current_group_id = str(event.message_obj.group_id) if event.message_obj.group_id else ""
-        
+
+        current_group_id = (
+            str(event.message_obj.group_id) if event.message_obj.group_id else ""
+        )
+
         target_group_id = current_group_id
         final_content = text
         op_type = "set"
@@ -410,7 +468,7 @@ class GroupWelcomePlugin(Star):
         if not current_group_id:
             sub_parts = text.split(maxsplit=1)
             first_word = sub_parts[0] if sub_parts else ""
-            
+
             if first_word.isdigit():
                 target_group_id = first_word
                 remaining = sub_parts[1].strip() if len(sub_parts) > 1 else ""
@@ -421,14 +479,20 @@ class GroupWelcomePlugin(Star):
             elif first_word in ["reset", "show"]:
                 op_type = first_word
                 if len(sub_parts) < 2:
-                    yield event.plain_result(f"❌ 私聊请指定群号，例如：/welcome set {first_word} 123456")
+                    yield event.plain_result(
+                        f"❌ 私聊请指定群号，例如：/welcome set {first_word} 123456"
+                    )
                     return
                 target_group_id = sub_parts[1].strip()
+                if not target_group_id.isdigit():
+                    yield event.plain_result(f"❌ 群号格式错误：{target_group_id}")
+                    return
             else:
                 yield event.plain_result("❌ 私聊模式请先写群号或操作(reset/show)。")
                 return
         else:
-            if text in ["reset", "show"]: op_type = text
+            if text in ["reset", "show"]:
+                op_type = text
 
         if op_type == "reset":
             self._del_group_template(target_group_id)
@@ -441,14 +505,18 @@ class GroupWelcomePlugin(Star):
                 yield event.plain_result("❌ 内容不能为空。")
                 return
             self._save_group_template(target_group_id, final_content)
-            yield event.plain_result(f"✅ 群 {target_group_id} 欢迎语已设置：\n{final_content}")
+            yield event.plain_result(
+                f"✅ 群 {target_group_id} 欢迎语已设置：\n{final_content}"
+            )
 
     @welcome.command("wl")
     @filter.permission_type(filter.PermissionType.ADMIN)
-    async def manage_whitelist(self, event: AstrMessageEvent, action: str = "", group_id: str = ""):
+    async def manage_whitelist(
+        self, event: AstrMessageEvent, action: str = "", group_id: str = ""
+    ):
         action = action.strip().lower()
         group_id = group_id.strip()
-        
+
         if action == "list":
             content = "、".join(sorted(self._whitelist)) if self._whitelist else "空"
             yield event.plain_result(f"📋 白名单：{content}")
@@ -461,11 +529,15 @@ class GroupWelcomePlugin(Star):
             self._save_lists()
             yield event.plain_result(f"✅ 已移除白名单 {group_id}")
         else:
-            yield event.plain_result("用法：\n/welcome wl add <群号>\n/welcome wl del <群号>\n/welcome wl list")
+            yield event.plain_result(
+                "用法：\n/welcome wl add <群号>\n/welcome wl del <群号>\n/welcome wl list"
+            )
 
     @welcome.command("bl")
     @filter.permission_type(filter.PermissionType.ADMIN)
-    async def manage_blacklist(self, event: AstrMessageEvent, action: str = "", group_id: str = ""):
+    async def manage_blacklist(
+        self, event: AstrMessageEvent, action: str = "", group_id: str = ""
+    ):
         action = action.strip().lower()
         group_id = group_id.strip()
 
@@ -481,7 +553,9 @@ class GroupWelcomePlugin(Star):
             self._save_lists()
             yield event.plain_result(f"✅ 已移除黑名单 {group_id}")
         else:
-            yield event.plain_result("用法：\n/welcome bl add <群号>\n/welcome bl del <群号>\n/welcome bl list")
+            yield event.plain_result(
+                "用法：\n/welcome bl add <群号>\n/welcome bl del <群号>\n/welcome bl list"
+            )
 
     @welcome.command("status")
     @filter.permission_type(filter.PermissionType.ADMIN)
@@ -493,7 +567,7 @@ class GroupWelcomePlugin(Star):
         templates = self._load_group_templates()
         wl = "、".join(sorted(self._whitelist)) if self._whitelist else "（空）"
         bl = "、".join(sorted(self._blacklist)) if self._blacklist else "（空）"
-        
+
         if query_gid:
             source = "群专属" if query_gid in templates else "全局默认"
             tip = f"📌 群 {query_gid} 欢迎语 [{source}]：\n{self._get_welcome_template(query_gid)}"
