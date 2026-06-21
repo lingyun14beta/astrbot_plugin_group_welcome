@@ -38,9 +38,9 @@
   },
   "ai_welcome_prompt": {
     "label": "📝 AI 提示词 (Prompt)",
-    "description": "指导 AI 如何生成欢迎语。变量：{name} (昵称)",
+    "description": "指导 AI 如何生成欢迎语。变量：{name} (新群成员昵称)、{role_prompt} (角色性格)",
     "type": "text",
-    "default": "请根据以下昵称，生成一句简短、温暖、有趣的入群欢迎语（不超过30字，不要带引号）：{name}"
+    "default": "请根据以下角色性格，为新群成员生成一句简短、温暖、有趣的入群欢迎语（不超过30字，不要带引号）。\n角色性格：{role_prompt}\n新群成员昵称：{name}"
   },
   "cooldown_seconds": {
     "label": "⏱️ 防刷屏冷却 (秒)",

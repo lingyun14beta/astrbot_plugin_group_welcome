@@ -1,9 +1,26 @@
 import json
 import time
 import asyncio
+import re
 from astrbot.api.event import filter, AstrMessageEvent
 from astrbot.api.star import Context, Star, StarTools
 from astrbot.api import logger, AstrBotConfig
+
+
+DEFAULT_AI_WELCOME_PROMPT = (
+    "请根据以下角色性格，为新群成员生成一句简短、温暖、有趣的入群欢迎语"
+    "（不超过30字，不要带引号）。\n"
+    "角色性格：{role_prompt}\n"
+    "新群成员昵称：{name}"
+)
+AI_PROMPT_VARIABLE_PATTERN = re.compile(r"\{(name|role_prompt)\}")
+
+
+def _render_ai_prompt(template: str, name: str, role_prompt: str) -> str:
+    values = {"name": name, "role_prompt": role_prompt}
+    return AI_PROMPT_VARIABLE_PATTERN.sub(
+        lambda match: values[match.group(1)], template
+    )
 
 
 def _parse_id_list(value) -> set:
@@ -151,11 +168,11 @@ class GroupWelcomePlugin(Star):
     # 核心逻辑
     # ──────────────────────────────────────────
 
-    def _get_client(self):
+    def _get_adapter(self):
         """
         使用鸭子类型判断适配器是否可用，
         避免依赖类名字符串匹配导致的脆弱性。
-        只要适配器拥有 bot 对象且 bot 具备 api 属性，即视为有效客户端。
+        只要适配器拥有 bot 对象且 bot 具备 api 属性，即视为有效适配器。
         """
         try:
             for adapter in self.context.platform_manager.get_insts():
@@ -164,10 +181,14 @@ class GroupWelcomePlugin(Star):
                     and adapter.bot
                     and hasattr(adapter.bot, "api")
                 ):
-                    return adapter.bot
+                    return adapter
         except Exception as e:
-            logger.debug(f"[group_welcome] _get_client 遍历适配器异常: {e}")
+            logger.debug(f"[group_welcome] _get_adapter 遍历适配器异常: {e}")
         return None
+
+    def _get_client(self):
+        adapter = self._get_adapter()
+        return adapter.bot if adapter else None
 
     def _clean_expired_cooldowns(self):
         now = time.time()
@@ -206,9 +227,10 @@ class GroupWelcomePlugin(Star):
                 return
             self._global_cooldown[key] = now
 
-        client = self._get_client()
-        if not client:
+        adapter = self._get_adapter()
+        if not adapter:
             return
+        client = adapter.bot
 
         name = await self._get_member_name(client, group_id, user_id)
 
@@ -228,7 +250,7 @@ class GroupWelcomePlugin(Star):
             welcome_text = f"🎉 欢迎 {name} 加入本群！{count_text}"
 
         if self._enable_ai_welcome:
-            ai_text = await self._gen_ai_welcome(name)
+            ai_text = await self._gen_ai_welcome(name, group_id, adapter)
             if ai_text:
                 welcome_text += f"\n\n✨ {ai_text}"
 
@@ -299,7 +321,30 @@ class GroupWelcomePlugin(Star):
         except Exception as e:
             logger.warning(f"[group_welcome] 私聊发送群规失败: {e}")
 
-    async def _gen_ai_welcome(self, name: str) -> str:
+    async def _get_persona_prompt(self, group_id: str, adapter) -> str:
+        """获取当前群聊实际生效的角色 System Prompt。"""
+        metadata = adapter.meta()
+        umo = f"{metadata.id}:GroupMessage:{group_id}"
+
+        conversation_id = (
+            await self.context.conversation_manager.get_curr_conversation_id(umo)
+        )
+        if conversation_id:
+            conversation = await self.context.conversation_manager.get_conversation(
+                umo, conversation_id
+            )
+            if conversation and conversation.persona_id:
+                persona = await self.context.persona_manager.get_persona(
+                    conversation.persona_id
+                )
+                return persona.system_prompt
+
+        default_persona = await self.context.persona_manager.get_default_persona_v3(
+            umo=umo
+        )
+        return default_persona["prompt"] if default_persona else ""
+
+    async def _gen_ai_welcome(self, name: str, group_id: str, adapter) -> str:
         """
         使用指定的 LLM Provider 生成欢迎语。
         """
@@ -323,17 +368,20 @@ class GroupWelcomePlugin(Star):
 
             prompt_fmt = self.config.get(
                 "ai_welcome_prompt",
-                "请根据以下昵称，生成一句简短、温暖、有趣的入群欢迎语：{name}",
+                DEFAULT_AI_WELCOME_PROMPT,
             )
 
-            final_prompt = prompt_fmt.replace("{name}", name)
-            if not final_prompt.strip():
-                final_prompt = (
-                    f"请根据以下昵称，生成一句简短、温暖、有趣的入群欢迎语：{name}"
-                )
+            if not prompt_fmt.strip():
+                prompt_fmt = DEFAULT_AI_WELCOME_PROMPT
+
+            role_prompt = ""
+            if "{role_prompt}" in prompt_fmt:
+                role_prompt = await self._get_persona_prompt(group_id, adapter)
+            final_prompt = _render_ai_prompt(prompt_fmt, name, role_prompt)
 
             resp = await provider.text_chat(
-                prompt=final_prompt, session_id=f"gw_{name}"
+                prompt=final_prompt,
+                session_id=f"gw_{name}",
             )
             return resp.completion_text.strip()
         except Exception as e:
