@@ -55,7 +55,7 @@
   },
   "welcome_image_url": {
     "description": "🖼️ 欢迎图片",
-    "hint": "欢迎时附带一张图片。可填网络URL或本地 file:/// 路径。留空不发送。",
+    "hint": "欢迎时附带一张图片。支持 png/jpg/gif/webp，建议 < 5MB。可填网络URL或本地 file:/// 路径。留空不发送。",
     "type": "text",
     "default": ""
   },

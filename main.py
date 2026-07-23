@@ -284,12 +284,31 @@ class GroupWelcomePlugin(Star):
                 {"type": "text", "data": {"text": f" {text}"}},
             ]
             if self._welcome_image_url.strip():
-                message.append(
-                    {"type": "image", "data": {"file": self._welcome_image_url.strip()}}
+                image_url = self._welcome_image_url.strip()
+                image_exts = (".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp")
+                non_image_exts = (
+                    ".mp4",
+                    ".avi",
+                    ".zip",
+                    ".exe",
+                    ".pdf",
+                    ".txt",
+                    ".svg",
                 )
-                logger.debug(
-                    f"[group_welcome] 已附加欢迎图片: {self._welcome_image_url}"
-                )
+                if not image_url.lower().startswith(
+                    ("http://", "https://", "file:///")
+                ):
+                    logger.warning(
+                        f"[group_welcome] 欢迎图片 URL 格式可能无效: {image_url}"
+                    )
+                else:
+                    base = image_url.lower().split("?")[0]
+                    if not base.endswith(image_exts) and base.endswith(non_image_exts):
+                        logger.warning(
+                            f"[group_welcome] 欢迎图片后缀不是常见图片格式: {image_url}"
+                        )
+                message.append({"type": "image", "data": {"file": image_url}})
+                logger.debug(f"[group_welcome] 已附加欢迎图片: {image_url}")
             await client.api.call_action(
                 "send_group_msg", group_id=int(group_id), message=message
             )
