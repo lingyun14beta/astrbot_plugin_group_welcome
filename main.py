@@ -58,6 +58,7 @@ class GroupWelcomePlugin(Star):
         self._enable_private_rules: bool = config.get("enable_private_rules", False)
         self._enable_ai_welcome: bool = config.get("enable_ai_welcome", False)
         self._ai_retry_count: int = config.get("ai_retry_count", 0)
+        self._welcome_image_url: str = config.get("welcome_image_url", "")
 
         self._whitelist: set = _parse_id_list(config.get("group_whitelist", []))
         self._blacklist: set = _parse_id_list(config.get("group_blacklist", []))
@@ -282,6 +283,13 @@ class GroupWelcomePlugin(Star):
                 {"type": "at", "data": {"qq": user_id}},
                 {"type": "text", "data": {"text": f" {text}"}},
             ]
+            if self._welcome_image_url.strip():
+                message.append(
+                    {"type": "image", "data": {"file": self._welcome_image_url.strip()}}
+                )
+                logger.debug(
+                    f"[group_welcome] 已附加欢迎图片: {self._welcome_image_url}"
+                )
             await client.api.call_action(
                 "send_group_msg", group_id=int(group_id), message=message
             )
