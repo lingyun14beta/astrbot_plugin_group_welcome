@@ -57,6 +57,7 @@ class GroupWelcomePlugin(Star):
         self._enable_member_count: bool = config.get("enable_member_count", True)
         self._enable_private_rules: bool = config.get("enable_private_rules", False)
         self._enable_ai_welcome: bool = config.get("enable_ai_welcome", False)
+        self._ai_retry_count: int = config.get("ai_retry_count", 0)
 
         self._whitelist: set = _parse_id_list(config.get("group_whitelist", []))
         self._blacklist: set = _parse_id_list(config.get("group_blacklist", []))
@@ -301,14 +302,13 @@ class GroupWelcomePlugin(Star):
 
     async def _gen_ai_welcome(self, name: str) -> str:
         """
-        使用指定的 LLM Provider 生成欢迎语。
+        使用指定的 LLM Provider 生成欢迎语，支持配置重试次数。
         """
         try:
             provider_id = self.config.get("llm_provider", "")
             provider = None
 
             if provider_id:
-                # 使用官方接口获取指定 Provider
                 provider = self.context.get_provider_by_id(provider_id)
                 if not provider:
                     logger.warning(
@@ -332,10 +332,23 @@ class GroupWelcomePlugin(Star):
                     f"请根据以下昵称，生成一句简短、温暖、有趣的入群欢迎语：{name}"
                 )
 
-            resp = await provider.text_chat(
-                prompt=final_prompt, session_id=f"gw_{name}"
+            retry_count = self._ai_retry_count
+            last_error = None
+            for attempt in range(retry_count + 1):
+                try:
+                    resp = await provider.text_chat(
+                        prompt=final_prompt, session_id=f"gw_{name}"
+                    )
+                    return resp.completion_text.strip()
+                except Exception as e:
+                    last_error = e
+                    logger.debug(
+                        f"[group_welcome] AI 生成第 {attempt + 1}/{retry_count + 1} 次尝试失败: {e}"
+                    )
+            logger.warning(
+                f"[group_welcome] AI 生成 {retry_count + 1} 次全部失败: {last_error}"
             )
-            return resp.completion_text.strip()
+            return ""
         except Exception as e:
             logger.warning(f"[group_welcome] AI 生成失败: {e}")
             return ""
