@@ -62,6 +62,7 @@
             "description": "AI模型提供商",
             "hint": "留空则使用全局或系统默认。",
             "type": "string",
+            "_special": "select_provider",
             "default": ""
           },
           "ai_retry_count": {
