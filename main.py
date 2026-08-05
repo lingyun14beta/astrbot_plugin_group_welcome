@@ -1,5 +1,6 @@
 import json
 import time
+import random
 import asyncio
 from astrbot.api.event import filter, AstrMessageEvent
 from astrbot.api.star import Context, Star, StarTools
@@ -38,6 +39,17 @@ def _serialize_group_templates(templates: dict) -> str:
     return json.dumps(templates, ensure_ascii=False)
 
 
+def _parse_template_list(value) -> list:
+    """解析模板库配置（template_list 类型）。"""
+    if not isinstance(value, list):
+        return []
+    result = []
+    for item in value:
+        if isinstance(item, dict):
+            result.append(item)
+    return result
+
+
 class GroupWelcomePlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
@@ -49,6 +61,9 @@ class GroupWelcomePlugin(Star):
         # 运行状态标记
         self._is_running = True
 
+        # 机器人自身 ID 缓存（用于跳过"机器人入群欢迎自己"）
+        self._self_id = None
+
         # 【Fix #2】改为实例变量，避免热重载时状态残留
         self._global_cooldown = {}
         self._last_cleanup_time = 0
@@ -58,13 +73,16 @@ class GroupWelcomePlugin(Star):
         self._enable_private_rules: bool = config.get("enable_private_rules", False)
         self._enable_ai_welcome: bool = config.get("enable_ai_welcome", False)
         self._ai_retry_count: int = config.get("ai_retry_count", 0)
-        self._welcome_image_url: str = config.get("welcome_image_url", "")
+        self._welcome_image_url: str | list = config.get("welcome_image_url", "")
 
         self._whitelist: set = _parse_id_list(config.get("group_whitelist", []))
         self._blacklist: set = _parse_id_list(config.get("group_blacklist", []))
 
         # 迁移旧版字符串格式 → list，避免 UI 把字符串逐字符展开
         self._migrate_id_lists()
+
+        # 迁移旧版单张图片字符串 → list
+        self._migrate_image_list()
 
         self.cooldown_file = StarTools.get_data_dir() / "cooldowns.json"
 
@@ -171,6 +189,17 @@ class GroupWelcomePlugin(Star):
             logger.debug(f"[group_welcome] _get_client 遍历适配器异常: {e}")
         return None
 
+    async def _is_self_user(self, client, user_id: str) -> bool:
+        """判断 user_id 是否为机器人自身（OneBot get_login_info）。结果缓存。"""
+        try:
+            if self._self_id is None:
+                res = await client.api.call_action("get_login_info")
+                self._self_id = str(res.get("user_id", ""))
+            return user_id == self._self_id
+        except Exception as e:
+            logger.debug(f"[group_welcome] 获取机器人自身信息失败: {e}")
+            return False
+
     def _clean_expired_cooldowns(self):
         now = time.time()
         if now - self._last_cleanup_time < 3600:
@@ -200,7 +229,7 @@ class GroupWelcomePlugin(Star):
         self._clean_expired_cooldowns()
 
         key = f"{group_id}:{user_id}"
-        cooldown = self.config.get("cooldown_seconds", 300)
+        cooldown = self._get_resolved_config(group_id, "cooldown_seconds", self.config.get("cooldown_seconds", 300))
 
         async with self._lock:
             now = time.time()
@@ -212,10 +241,15 @@ class GroupWelcomePlugin(Star):
         if not client:
             return
 
+        # 【Fix #3】机器人自己入群时不欢迎自己
+        if await self._is_self_user(client, user_id):
+            logger.info(f"[group_welcome] 检测到机器人自身 ({user_id}) 入群，跳过欢迎。")
+            return
+
         name = await self._get_member_name(client, group_id, user_id)
 
         count_text = ""
-        if self._enable_member_count:
+        if self._get_resolved_config(group_id, "enable_member_count", self._enable_member_count):
             count = await self._get_group_member_count(client, group_id)
             if count:
                 count_text = f"\n你是当前群里第 {count} 位成员！"
@@ -229,15 +263,16 @@ class GroupWelcomePlugin(Star):
             logger.warning(f"[group_welcome] 群 {group_id} 欢迎语模板格式错误: {e}")
             welcome_text = f"🎉 欢迎 {name} 加入本群！{count_text}"
 
-        if self._enable_ai_welcome:
-            ai_text = await self._gen_ai_welcome(name)
+        if self._get_resolved_config(group_id, "enable_ai_welcome", self._enable_ai_welcome):
+            ai_text = await self._gen_ai_welcome(group_id, name)
             if ai_text:
                 welcome_text += f"\n\n✨ {ai_text}"
 
         await self._send_group_welcome(client, group_id, user_id, welcome_text)
 
-        if self._enable_private_rules:
-            await self._send_private_rules(client, user_id)
+        if self._get_resolved_config(group_id, "enable_private_rules", self._enable_private_rules):
+            rules = self._get_resolved_config(group_id, "group_rules", self.config.get("group_rules", "📋 请遵守群规，友善交流！"))
+            await self._send_private_rules(client, user_id, rules)
 
     def _check_group_allowed(self, group_id: str) -> bool:
         if self._whitelist:
@@ -245,9 +280,45 @@ class GroupWelcomePlugin(Star):
         return group_id not in self._blacklist
 
     def _get_welcome_template(self, group_id: str) -> str:
+        # 优先级1：模板库中匹配当前群的模板欢迎语
+        tpl = self._get_template_for_group(group_id)
+        if tpl:
+            tpl_text = tpl.get("template_text")
+            if isinstance(tpl_text, str) and tpl_text.strip():
+                return tpl_text
+        # 优先级2：旧版群专属欢迎语（/welcome set 配置）
         templates = self._load_group_templates()
         default = "🎉 欢迎 {name} 加入本群！很高兴认识你～{count_text}"
+        # 优先级3：全局默认欢迎语
         return templates.get(group_id, self.config.get("welcome_template", default))
+
+    def _load_template_list(self) -> list:
+        """加载模板库配置。"""
+        return _parse_template_list(self.config.get("group_template_list", []))
+
+    def _get_template_for_group(self, group_id: str) -> dict | None:
+        """查找 group_ids 包含当前群号的模板，返回第一个匹配项。"""
+        for tpl in self._load_template_list():
+            ids = tpl.get("group_ids") or []
+            if group_id in {str(i) for i in ids}:
+                return tpl
+        return None
+
+    def _get_resolved_config(self, group_id: str, key: str, global_value):
+        """三级 fallback：模板字段(非空) → 全局配置 → 全局默认。
+
+        模板里的 bool/int 字段始终以模板为准（模板条目的 default 已由 WebUI 填充），
+        字符串/list 字段为空时回退到全局配置。
+        """
+        tpl = self._get_template_for_group(group_id)
+        if tpl is None:
+            return global_value
+        value = tpl.get(key)
+        if value is None:
+            return global_value
+        if isinstance(value, (str, list)) and not value:
+            return global_value
+        return value
 
     async def _get_member_name(self, client, group_id: str, user_id: str) -> str:
         try:
@@ -283,41 +354,50 @@ class GroupWelcomePlugin(Star):
                 {"type": "at", "data": {"qq": user_id}},
                 {"type": "text", "data": {"text": f" {text}"}},
             ]
-            if self._welcome_image_url.strip():
-                image_url = self._welcome_image_url.strip()
-                image_exts = (".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp")
-                non_image_exts = (
-                    ".mp4",
-                    ".avi",
-                    ".zip",
-                    ".exe",
-                    ".pdf",
-                    ".txt",
-                    ".svg",
-                )
-                if not image_url.lower().startswith(
-                    ("http://", "https://", "file:///")
-                ):
-                    logger.warning(
-                        f"[group_welcome] 欢迎图片 URL 格式可能无效: {image_url}"
-                    )
-                else:
-                    base = image_url.lower().split("?")[0]
-                    if not base.endswith(image_exts) and base.endswith(non_image_exts):
-                        logger.warning(
-                            f"[group_welcome] 欢迎图片后缀不是常见图片格式: {image_url}"
-                        )
+            image_urls = self._get_resolved_image_urls(group_id)
+            if image_urls:
+                image_url = random.choice(image_urls)
                 message.append({"type": "image", "data": {"file": image_url}})
-                logger.debug(f"[group_welcome] 已附加欢迎图片: {image_url}")
+                logger.debug(f"[group_welcome] 已随机附加欢迎图片: {image_url}")
             await client.api.call_action(
                 "send_group_msg", group_id=int(group_id), message=message
             )
         except Exception as e:
             logger.error(f"[group_welcome] 发送欢迎语异常: {e}")
 
-    async def _send_private_rules(self, client, user_id: str):
+    def _get_resolved_image_urls(self, group_id: str) -> list:
+        """获取当前群欢迎图片池。模板优先，否则用全局配置。兼容旧版字符串配置。"""
+        urls = self._get_resolved_config(group_id, "welcome_image_url", self._welcome_image_url)
+        if isinstance(urls, str):
+            urls = [urls] if urls.strip() else []
+        elif not isinstance(urls, list):
+            urls = []
+        urls = [u for u in urls if isinstance(u, str) and u.strip()]
+        for image_url in urls:
+            self._warn_invalid_image_url(image_url)
+        return urls
+
+    @staticmethod
+    def _warn_invalid_image_url(image_url: str):
+        """对格式可疑的图片 URL 记录警告，便于排查。"""
+        try:
+            if not image_url.lower().startswith(("http://", "https://", "file:///")):
+                logger.warning(
+                    f"[group_welcome] 欢迎图片 URL 格式可能无效: {image_url}"
+                )
+                return
+            image_exts = (".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp")
+            non_image_exts = (".mp4", ".avi", ".zip", ".exe", ".pdf", ".txt", ".svg")
+            base = image_url.lower().split("?")[0]
+            if not base.endswith(image_exts) and base.endswith(non_image_exts):
+                logger.warning(
+                    f"[group_welcome] 欢迎图片后缀不是常见图片格式: {image_url}"
+                )
+        except Exception:
+            pass
+
+    async def _send_private_rules(self, client, user_id: str, rules: str):
         await asyncio.sleep(2)
-        rules = self.config.get("group_rules", "📋 请遵守群规，友善交流！")
         try:
             if not user_id.isdigit():
                 return
@@ -327,12 +407,13 @@ class GroupWelcomePlugin(Star):
         except Exception as e:
             logger.warning(f"[group_welcome] 私聊发送群规失败: {e}")
 
-    async def _gen_ai_welcome(self, name: str) -> str:
+    async def _gen_ai_welcome(self, group_id: str, name: str) -> str:
         """
         使用指定的 LLM Provider 生成欢迎语，支持配置重试次数。
+        模板配置优先，空值回退全局配置。
         """
         try:
-            provider_id = self.config.get("llm_provider", "")
+            provider_id = self._get_resolved_config(group_id, "llm_provider", self.config.get("llm_provider", ""))
             provider = None
 
             if provider_id:
@@ -348,9 +429,13 @@ class GroupWelcomePlugin(Star):
             if not provider:
                 return ""
 
-            prompt_fmt = self.config.get(
+            prompt_fmt = self._get_resolved_config(
+                group_id,
                 "ai_welcome_prompt",
-                "请根据以下昵称，生成一句简短、温暖、有趣的入群欢迎语：{name}",
+                self.config.get(
+                    "ai_welcome_prompt",
+                    "请根据以下昵称，生成一句简短、温暖、有趣的入群欢迎语：{name}",
+                ),
             )
 
             final_prompt = prompt_fmt.replace("{name}", name)
@@ -359,7 +444,7 @@ class GroupWelcomePlugin(Star):
                     f"请根据以下昵称，生成一句简短、温暖、有趣的入群欢迎语：{name}"
                 )
 
-            retry_count = self._ai_retry_count
+            retry_count = self._get_resolved_config(group_id, "ai_retry_count", self._ai_retry_count)
             last_error = None
             for attempt in range(retry_count + 1):
                 try:
@@ -398,6 +483,17 @@ class GroupWelcomePlugin(Star):
                 changed = True
         if changed:
             self.config.save_config()
+
+    def _migrate_image_list(self) -> None:
+        """迁移旧版单张图片字符串 → list，避免 UI 把字符串逐字符展开。"""
+        value = self.config.get("welcome_image_url")
+        if isinstance(value, str):
+            self.config["welcome_image_url"] = (
+                [value] if value.strip() else []
+            )
+            self._welcome_image_url = self.config["welcome_image_url"]
+            self.config.save_config()
+            logger.info("[group_welcome] 已将 welcome_image_url 从旧版字符串格式迁移为列表格式。")
 
     def _save_switches(self):
         self.config["enable_member_count"] = self._enable_member_count
@@ -605,14 +701,25 @@ class GroupWelcomePlugin(Star):
         query_gid = target_group if target_group else curr_gid
 
         templates = self._load_group_templates()
+        template_list = self._load_template_list()
         wl = "、".join(sorted(self._whitelist)) if self._whitelist else "（空）"
         bl = "、".join(sorted(self._blacklist)) if self._blacklist else "（空）"
 
         if query_gid:
-            source = "群专属" if query_gid in templates else "全局默认"
+            matched_tpl = self._get_template_for_group(query_gid)
+            if matched_tpl:
+                source = f"模板库（第 {template_list.index(matched_tpl) + 1} 条）"
+            elif query_gid in templates:
+                source = "群专属"
+            else:
+                source = "全局默认"
             tip = f"📌 群 {query_gid} 欢迎语 [{source}]：\n{self._get_welcome_template(query_gid)}"
         else:
-            tip = f"📌 已自定义群数：{len(templates)}\n💡 提示：私聊可带群号查询。"
+            tip = (
+                f"📌 已自定义群数：{len(templates)}\n"
+                f"📦 模板库条数：{len(template_list)}\n"
+                f"💡 提示：私聊可带群号查询。"
+            )
 
         result = f"""📊 group_welcome 插件状态
 {"─" * 24}
