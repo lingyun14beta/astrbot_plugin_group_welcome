@@ -5,6 +5,91 @@
     "type": "text",
     "default": "🎉 欢迎 {name} 加入本群！很高兴认识你～{count_text}"
   },
+  "group_whitelist": {
+    "description": "✅ 白名单群号",
+    "hint": "【白名单模式】填写后，只有这些群会触发欢迎。",
+    "type": "list",
+    "default": []
+  },
+  "group_blacklist": {
+    "description": "🚫 黑名单群号",
+    "hint": "【黑名单模式】只有当白名单为空时生效。",
+    "type": "list",
+    "default": []
+  },
+  "group_template_list": {
+    "description": "📦 群欢迎模板库",
+    "hint": "按群号匹配，命中群使用模板配置；文本/图片项留空时回退到全局配置。",
+    "type": "template_list",
+    "templates": {
+      "default_tpl": {
+        "name": "群欢迎模板",
+        "display_item": "template_text",
+        "items": {
+          "group_ids": {
+            "description": "适用群号",
+            "hint": "填写要套用该模板的群号。",
+            "type": "list",
+            "default": []
+          },
+          "template_text": {
+            "description": "欢迎语",
+            "hint": "支持 {name}、{count_text} 变量。",
+            "type": "text",
+            "default": ""
+          },
+          "enable_member_count": {
+            "description": "开启群人数统计",
+            "type": "bool",
+            "default": true
+          },
+          "enable_private_rules": {
+            "description": "开启私聊群规",
+            "type": "bool",
+            "default": false
+          },
+          "group_rules": {
+            "description": "群规内容",
+            "type": "text",
+            "default": ""
+          },
+          "enable_ai_welcome": {
+            "description": "开启AI欢迎",
+            "type": "bool",
+            "default": false
+          },
+          "llm_provider": {
+            "description": "AI模型提供商",
+            "hint": "留空则使用全局或系统默认。",
+            "type": "string",
+            "default": ""
+          },
+          "ai_retry_count": {
+            "description": "AI重试次数",
+            "type": "int",
+            "default": 0
+          },
+          "ai_welcome_prompt": {
+            "description": "AI提示词",
+            "type": "text",
+            "default": ""
+          },
+          "welcome_image_url": {
+            "description": "欢迎图片池",
+            "hint": "可填写多张图片，每次入群随机发送一张。",
+            "type": "list",
+            "default": []
+          },
+          "cooldown_seconds": {
+            "description": "防刷屏冷却(秒)",
+            "type": "int",
+            "default": 300
+          }
+        }
+      }
+    },
+    "default": []
+  },
   "enable_member_count": {
     "description": "📊 开启群人数统计",
     "hint": "开启后，变量 {count_text} 会被替换为\"你是当前群里第 x 位成员！\"",
@@ -54,28 +139,16 @@
     "default": "请根据以下昵称，生成一句简短、温暖、有趣的入群欢迎语（不超过30字，不要带引号）：{name}"
   },
   "welcome_image_url": {
-    "description": "🖼️ 欢迎图片",
-    "hint": "欢迎时附带一张图片。支持 png/jpg/gif/webp，建议 < 5MB。可填网络URL或本地 file:/// 路径。留空不发送。",
-    "type": "text",
-    "default": ""
+    "description": "🖼️ 欢迎图片池",
+    "hint": "可填多张图片，欢迎时随机发送一张。支持 png/jpg/gif/webp，建议 < 5MB。可填网络URL或本地 file:/// 路径。留空不发送。",
+    "type": "list",
+    "default": []
   },
   "cooldown_seconds": {
     "description": "⏱️ 防刷屏冷却 (秒)",
     "hint": "同一用户重复进群触发欢迎的最小间隔时间",
     "type": "int",
     "default": 300
-  },
-  "group_whitelist": {
-    "description": "✅ 白名单群号",
-    "hint": "【白名单模式】填写后，只有这些群会触发欢迎。",
-    "type": "list",
-    "default": []
-  },
-  "group_blacklist": {
-    "description": "🚫 黑名单群号",
-    "hint": "【黑名单模式】只有当白名单为空时生效。",
-    "type": "list",
-    "default": []
   },
   "group_templates": {
     "description": "💾[系统数据] 群专属配置",
