@@ -1,4 +1,5 @@
 import json
+import re
 import time
 import random
 import asyncio
@@ -55,6 +56,27 @@ def _parse_template_list(value) -> list:
     return result
 
 
+def _render_without_name(template: str, count_text: str) -> str:
+    """昵称不可用时，从欢迎语模板里移除 {name} 并整理空白。
+
+    中文模板通常在 {name} 两侧留空格（如「欢迎 {name} 加入本群」），直接删掉
+    会得到「欢迎  加入本群」。这里合并多余空格、去掉中文字符之间因此残留的
+    空格，并清理标点前的空格，让语句保持通顺。
+
+    Args:
+        template: 欢迎语模板。
+        count_text: 已展开的群人数文案。
+
+    Returns:
+        不含昵称的欢迎语。
+    """
+    text = template.replace("{name}", "").replace("{count_text}", count_text)
+    text = re.sub(r"[ \t]{2,}", " ", text)
+    text = re.sub(r"(?<=[\u4e00-\u9fff])[ \t]+(?=[\u4e00-\u9fff])", "", text)
+    text = re.sub(r"[ \t]+([，。！？、；：,.!?;:])", r"\1", text)
+    return text.strip()
+
+
 class GroupWelcomePlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
@@ -83,7 +105,10 @@ class GroupWelcomePlugin(Star):
         # QQ 官方机器人（官机）支持
         self._enable_qqofficial: bool = bool(config.get("enable_qqofficial", True))
         self._fallback_member_name: str = str(
-            config.get("fallback_member_name") or "新朋友"
+            config.get("fallback_member_name") or ""
+        ).strip()
+        self._qq_inline_image: bool = bool(
+            config.get("qqofficial_image_inline", True)
         )
         self._onebot_registered = False
         self._qq_clients: list = []
@@ -421,16 +446,21 @@ class GroupWelcomePlugin(Star):
             if count:
                 count_text = f"\n你是当前群里第 {count} 位成员！"
 
-        # 生成欢迎语
+        # 生成欢迎语。昵称为空时（官机未开放成员信息接口）自动省略 {name}。
         template = self._get_welcome_template(group_id)
 
-        try:
-            welcome_text = template.format(name=name, count_text=count_text)
-        except Exception as e:
-            logger.warning(f"[group_welcome] 群 {group_id} 欢迎语模板格式错误: {e}")
-            welcome_text = f"🎉 欢迎 {name} 加入本群！{count_text}"
+        if name:
+            try:
+                welcome_text = template.format(name=name, count_text=count_text)
+            except Exception as e:
+                logger.warning(
+                    f"[group_welcome] 群 {group_id} 欢迎语模板格式错误: {e}"
+                )
+                welcome_text = f"🎉 欢迎 {name} 加入本群！{count_text}"
+        else:
+            welcome_text = _render_without_name(template, count_text)
 
-        if self._get_resolved_config(
+        if name and self._get_resolved_config(
             group_id, "enable_ai_welcome", self._enable_ai_welcome
         ):
             ai_text = await self._gen_ai_welcome(group_id, name)
@@ -444,7 +474,13 @@ class GroupWelcomePlugin(Star):
             )
         else:
             await qo_bridge.send_group_welcome(
-                self.context, adapter, group_id, user_id, welcome_text, image_url
+                self.context,
+                adapter,
+                group_id,
+                user_id,
+                welcome_text,
+                image_url,
+                inline_image=self._qq_inline_image,
             )
 
         if self._get_resolved_config(

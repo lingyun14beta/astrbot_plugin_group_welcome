@@ -37,8 +37,8 @@ GROUP_MEMBER_EVENT_INTENT = 1 << 24
 QQOFFICIAL_PLATFORM_NAMES = ("qq_official", "qq_official_webhook")
 """AstrBot 中两个 QQ 官方机器人适配器的平台名。"""
 
-DEFAULT_FALLBACK_NAME = "新朋友"
-"""官方接口取不到昵称时使用的占位称呼。"""
+DEFAULT_FALLBACK_NAME = ""
+"""昵称不可用时的默认回退；空字符串表示欢迎语省略昵称。"""
 
 _INTENTS_PATCH_FLAG = "_group_welcome_member_intent_patched"
 
@@ -256,12 +256,15 @@ async def send_group_welcome(
     user_id: str,
     text: str,
     image_url: str = "",
+    inline_image: bool = True,
 ) -> None:
     """通过 QQ 官方机器人发送入群欢迎语（含 @ 新成员与可选图片）。
 
     官机入群事件没有可用的 msg_id，因此这里发送的是主动消息，会消耗群主动消息
-    配额（每个群每天 1000 条）。为了只占一条配额，公网图片会以 Markdown 内嵌
-    图片的语法塞进同一条消息；本地图片无法内嵌，才拆成第二条富媒体消息。
+    配额（每个群每天 1000 条）。``inline_image`` 为 True 时公网图片以 Markdown
+    内嵌图片随欢迎语一起发出（只占 1 条配额，但要求图片可被 QQ 服务器访问）；
+    为 False 或本地图片时，图片改为富媒体上传后单独发送（多占 1 条配额，但由
+    AstrBot 自己下载图片，兼容内网 / 防盗链地址）。
 
     Args:
         context: AstrBot 插件 Context。
@@ -270,10 +273,11 @@ async def send_group_welcome(
         user_id: 新成员的 OpenID。
         text: 欢迎语正文。
         image_url: 可选的欢迎图片地址或本地路径。
+        inline_image: 是否把公网图片内嵌进同一条 Markdown 消息。
     """
     # Markdown 消息支持 ![说明](url)，平台会自动下载转存该图片。
-    inline_image = _is_remote_image(image_url)
-    markdown_text = f"{text}\n\n![欢迎图片]({image_url})" if inline_image else text
+    use_inline = bool(inline_image) and _is_remote_image(image_url)
+    markdown_text = f"{text}\n\n![欢迎图片]({image_url})" if use_inline else text
 
     try:
         session = MessageSession(
@@ -293,7 +297,7 @@ async def send_group_welcome(
         logger.error(f"[group_welcome] {_describe_send_error(exc)}")
         return
 
-    if not image_url or inline_image:
+    if not image_url or use_inline:
         return
     try:
         await context.send_message(session, _build_image_chain(image_url))
@@ -395,7 +399,7 @@ async def get_member_name(
                 _name_api_permission_warned = True
                 logger.warning(
                     "[group_welcome] QQ 官方群成员信息接口未开通权限（内邀能力），"
-                    "欢迎语暂用占位昵称；申请到权限后会自动生效。"
+                    "欢迎语会使用占位称呼或省略昵称；申请到权限后会自动生效。"
                 )
         else:
             logger.debug(f"[group_welcome] 获取官机成员昵称失败: {exc}")

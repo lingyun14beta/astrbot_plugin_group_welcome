@@ -165,8 +165,14 @@
   },
   "fallback_member_name": {
     "description": "🏷️ 官机昵称占位",
-    "hint": "QQ 官方机器人拿不到新成员昵称时使用的称呼，仅官机场景生效。",
+    "hint": "QQ 官方机器人拿不到新成员昵称时使用的称呼；留空（推荐）则欢迎语直接省略昵称，例如「欢迎加入」。",
     "type": "text",
-    "default": "新朋友"
+    "default": ""
+  },
+  "qqofficial_image_inline": {
+    "description": "🖼️ 官机图片内嵌发送",
+    "hint": "开启：图片以 Markdown 内嵌随欢迎语发出，只占 1 条主动消息，但要求图片能被 QQ 服务器公网访问。关闭：图片改为富媒体上传后单独发送（多占 1 条主动消息），兼容内网、防盗链、图床限制的图片。",
+    "type": "bool",
+    "default": true
   }
 }
