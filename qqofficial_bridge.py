@@ -217,6 +217,37 @@ def _describe_send_error(exc: Exception) -> str:
     return f"QQ 官方欢迎语发送失败: {exc}"
 
 
+_OPENID_RE = re.compile(r"^[A-Za-z0-9_-]{2,128}$")
+"""群 / 成员 OpenID 允许的字符集，防止把任意字符串拼进官方接口路径。"""
+
+_MARKDOWN_UNSAFE_URL_RE = re.compile(r"[\s()<>`\"']")
+"""会破坏 Markdown 图片语法或可被用于注入的字符。"""
+
+
+def _is_valid_openid(value: str) -> bool:
+    """校验 OpenID 格式，避免路径注入。
+
+    Args:
+        value: 群或成员的 OpenID。
+
+    Returns:
+        格式合法返回 True。
+    """
+    return bool(_OPENID_RE.match(str(value or "")))
+
+
+def _is_markdown_safe_url(image_url: str) -> bool:
+    """判断图片 URL 能否安全嵌入 Markdown 图片语法。
+
+    Args:
+        image_url: 图片地址。
+
+    Returns:
+        不含空白、括号、尖括号与引号时返回 True。
+    """
+    return bool(image_url) and not _MARKDOWN_UNSAFE_URL_RE.search(image_url)
+
+
 def _is_remote_image(image_url: str) -> bool:
     """判断图片地址是否为公网 HTTP(S) 地址。
 
@@ -276,7 +307,18 @@ async def send_group_welcome(
         inline_image: 是否把公网图片内嵌进同一条 Markdown 消息。
     """
     # Markdown 消息支持 ![说明](url)，平台会自动下载转存该图片。
+    image_url = str(image_url or "").strip()
+    if not _is_valid_openid(group_id) or not _is_valid_openid(user_id):
+        logger.warning(
+            f"[group_welcome] 忽略非法 OpenID: group={group_id!r} member={user_id!r}"
+        )
+        return
     use_inline = bool(inline_image) and _is_remote_image(image_url)
+    if use_inline and not _is_markdown_safe_url(image_url):
+        logger.warning(
+            "[group_welcome] 欢迎图片 URL 含空格或括号等字符，已改用富媒体方式发送。"
+        )
+        use_inline = False
     markdown_text = f"{text}\n\n![欢迎图片]({image_url})" if use_inline else text
 
     try:
@@ -322,6 +364,9 @@ async def send_private_rules(
         user_id: 用户 OpenID。
         rules: 群规文本。
     """
+    if not _is_valid_openid(user_id):
+        logger.warning(f"[group_welcome] 忽略非法成员 OpenID: {user_id!r}")
+        return
     try:
         session = MessageSession(
             adapter.meta().id,
@@ -373,6 +418,11 @@ async def get_member_name(
 
     key = (group_id, user_id)
     now = time.time()
+    if not _is_valid_openid(group_id) or not _is_valid_openid(user_id):
+        logger.debug(
+            f"[group_welcome] 忽略非法 OpenID: group={group_id!r} member={user_id!r}"
+        )
+        return fallback
     cached = _member_name_cache.get(key)
     if cached and cached[0] > now:
         return cached[1]
@@ -427,6 +477,9 @@ async def get_group_member_count(adapter: Any, group_id: str) -> int | None:
         群人数；接口不可用或字段缺失时返回 None。
     """
     now = time.time()
+    if not _is_valid_openid(group_id):
+        logger.debug(f"[group_welcome] 忽略非法群 OpenID: {group_id!r}")
+        return None
     cached = _member_count_cache.get(group_id)
     if cached and cached[0] > now:
         return cached[1]

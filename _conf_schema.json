@@ -151,6 +151,12 @@
     "type": "int",
     "default": 300
   },
+  "max_welcomes_per_minute": {
+    "description": "🛡️ 单群每分钟欢迎上限",
+    "hint": "防止大量账号同时入群（炸群）把欢迎语刷屏，按群统计；0 表示不限制。",
+    "type": "int",
+    "default": 20
+  },
   "group_templates": {
     "description": "💾[系统数据] 群专属配置",
     "hint": "⚠️ 请在群内使用 /welcome set 指令进行配置。",
