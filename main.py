@@ -89,6 +89,7 @@ class GroupWelcomePlugin(Star):
         self._qq_clients: list = []
         self._qq_patch_ready = False
         self._qq_version_checked = False
+        self._qq_hot_reload = False
         if self._enable_qqofficial and qo_bridge is not None:
             # 必须在平台适配器建立连接之前安装补丁，插件初始化早于平台初始化。
             self._qq_patch_ready = qo_bridge.patch_botpy_for_member_event()
@@ -98,9 +99,12 @@ class GroupWelcomePlugin(Star):
                 except Exception:
                     platform_ready = False
                 if platform_ready:
+                    # 平台已连接，intent 协商早已完成，本次补丁只对下次连接生效。
+                    self._qq_hot_reload = True
                     logger.warning(
-                        "[group_welcome] 检测到插件热重载：QQ 官方机器人入群事件"
-                        "需要重启 AstrBot 后才会推送。"
+                        "[group_welcome] 检测到插件热重载：QQ 官方机器人的入群事件"
+                        "订阅（intent）在连接时已协商完毕，本次补丁不会生效；"
+                        "消息回调可以挂上，但事件要完整重启 AstrBot 后才会推送。"
                     )
                 else:
                     logger.info("[group_welcome] 已启用 QQ 官方机器人入群事件支持。")
@@ -199,7 +203,15 @@ class GroupWelcomePlugin(Star):
 
                 if qo_bridge.attach_member_handler(adapter, _qq_member_handler):
                     self._qq_clients.append((adapter, client))
-                    logger.info("[group_welcome] QQ 官方机器人入群事件监听已成功注册。")
+                    if self._qq_hot_reload:
+                        logger.info(
+                            "[group_welcome] QQ 官方机器人入群事件回调已挂载"
+                            "（热重载：需完整重启 AstrBot 后才会收到事件）。"
+                        )
+                    else:
+                        logger.info(
+                            "[group_welcome] QQ 官方机器人入群事件监听已成功注册。"
+                        )
 
         pending_onebot = not self._onebot_registered and any(
             self._is_onebot_adapter(adapter) for adapter in insts
