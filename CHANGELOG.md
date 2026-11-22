@@ -1,5 +1,14 @@
 # 更新日志 (CHANGELOG)
 
+## [v2.6.0]
+*   **Added**  : 适配 QQ 官方机器人（qq_official / qq_official_webhook）。通过补丁为 qq-botpy 补充 `GROUP_MEMBER_ADD` 的 intent 位与事件解析器，入群后主动发送欢迎语
+*   **Added**  : 官机场景使用 Markdown `<qqbot-at-user />` 艾特新成员；公网欢迎图片以 Markdown 内嵌图片随欢迎语一次发出，只占 1 条主动消息（本地图片才拆第二条富媒体消息）
+*   **Added**  : 官机昵称通过群成员信息接口获取，取不到时使用可配置的占位称呼（默认「新朋友」）；群人数通过群信息接口获取
+*   **Added**  : 新增配置项「QQ 官方机器人支持」「官机昵称占位」
+*   **Changed**: 入群处理抽象为统一流程，OneBot 11 与 QQ 官方机器人共用冷却、黑白名单、模板库与 AI 欢迎
+*   **Changed**: `/welcome set` 私聊模式支持 group_openid，`/welcome status` 增加群标识展示
+*   **Note**   : 官机欢迎消息属于「主动消息」，需要机器人开通主动消息权限，单群每天上限 1000 条
+
 ## [v2.5.0]
 *   **Fix**    : 修复机器人被拉入群时向自己发送欢迎语的问题，检测到机器人自身入群时自动跳过
 *   **Added**  : 新增群欢迎模板库（template_list），支持按群号匹配套用多套欢迎配置，模板未填写的项回退到全局配置

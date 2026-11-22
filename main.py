@@ -6,6 +6,11 @@ from astrbot.api.event import filter, AstrMessageEvent
 from astrbot.api.star import Context, Star, StarTools
 from astrbot.api import logger, AstrBotConfig
 
+try:
+    from . import qqofficial_bridge as qo_bridge
+except ImportError:  # pragma: no cover - 插件以非包形式加载时降级为仅 OneBot
+    qo_bridge = None
+
 
 def _parse_id_list(value) -> set:
     """解析 list 或逗号分隔的群号字符串为集合（兼容旧版字符串格式）。"""
@@ -75,6 +80,30 @@ class GroupWelcomePlugin(Star):
         self._ai_retry_count: int = config.get("ai_retry_count", 0)
         self._welcome_image_url: str | list = config.get("welcome_image_url", "")
 
+        # QQ 官方机器人（官机）支持
+        self._enable_qqofficial: bool = bool(config.get("enable_qqofficial", True))
+        self._fallback_member_name: str = str(
+            config.get("fallback_member_name") or "新朋友"
+        )
+        self._onebot_registered = False
+        self._qq_clients: list = []
+        self._qq_patch_ready = False
+        if self._enable_qqofficial and qo_bridge is not None:
+            # 必须在平台适配器建立连接之前安装补丁，插件初始化早于平台初始化。
+            self._qq_patch_ready = qo_bridge.patch_botpy_for_member_event()
+            if self._qq_patch_ready:
+                try:
+                    platform_ready = bool(self.context.platform_manager.get_insts())
+                except Exception:
+                    platform_ready = False
+                if platform_ready:
+                    logger.warning(
+                        "[group_welcome] 检测到插件热重载：QQ 官方机器人入群事件"
+                        "需要重启 AstrBot 后才会推送。"
+                    )
+                else:
+                    logger.info("[group_welcome] 已启用 QQ 官方机器人入群事件支持。")
+
         self._whitelist: set = _parse_id_list(config.get("group_whitelist", []))
         self._blacklist: set = _parse_id_list(config.get("group_blacklist", []))
 
@@ -97,33 +126,94 @@ class GroupWelcomePlugin(Star):
     # ──────────────────────────────────────────
 
     async def _safe_register_handler(self):
-        """稳健的事件监听注册逻辑。"""
+        """稳健的事件监听注册逻辑（OneBot 11 与 QQ 官方机器人）。"""
         max_retries = 15
         for _ in range(max_retries):
             if not self._is_running:
                 return
 
-            client = self._get_client()
-            if client:
-                try:
-                    if hasattr(client, "on_notice"):
-
-                        @client.on_notice("group_increase")
-                        async def _group_increase_handler(event):
-                            if not self._is_running:
-                                return
-                            await self._on_notice(event)
-
-                        logger.info(
-                            "[group_welcome] OneBot 11 入群事件监听已成功注册。"
-                        )
-                        return
-                except Exception as e:
-                    logger.error(f"[group_welcome] 注册监听失败: {e}")
+            try:
+                if self._try_register_handlers():
+                    return
+            except Exception as e:
+                logger.error(f"[group_welcome] 注册监听失败: {e}")
 
             await asyncio.sleep(5)
 
-        logger.warning("[group_welcome] 超时未找到 OneBot 适配器，插件功能可能受限。")
+        logger.warning(
+            "[group_welcome] 超时未找到可用的消息平台适配器，插件功能可能受限。"
+        )
+
+    def _try_register_handlers(self) -> bool:
+        """为当前已加载的适配器注册入群监听。
+
+        平台适配器在插件初始化之后才创建，因此这里轮询等待。全部可注册的
+        适配器都挂载完成后返回 True；仍有适配器未就绪时返回 False 继续等待。
+
+        Returns:
+            是否已经处理完当前所有相关适配器。
+        """
+        try:
+            insts = list(self.context.platform_manager.get_insts())
+        except Exception as e:
+            logger.debug(f"[group_welcome] 获取平台适配器异常: {e}")
+            return False
+        if not insts:
+            return False
+
+        if not self._onebot_registered:
+            client = self._get_client(insts)
+            if client is not None and hasattr(client, "on_notice"):
+
+                @client.on_notice("group_increase")
+                async def _group_increase_handler(event):
+                    if not self._is_running:
+                        return
+                    await self._on_notice(event)
+
+                self._onebot_registered = True
+                logger.info("[group_welcome] OneBot 11 入群事件监听已成功注册。")
+
+        if self._qq_patch_ready and qo_bridge is not None:
+            for adapter in insts:
+                if not qo_bridge.is_qqofficial_adapter(adapter):
+                    continue
+                client = getattr(adapter, "client", None)
+                if client is None:
+                    continue
+                if any(existing is client for _, existing in self._qq_clients):
+                    continue
+
+                async def _qq_member_handler(payload, _adapter=adapter):
+                    if not self._is_running:
+                        return
+                    await self._on_qq_member_join(_adapter, payload)
+
+                if qo_bridge.attach_member_handler(adapter, _qq_member_handler):
+                    self._qq_clients.append((adapter, client))
+                    logger.info("[group_welcome] QQ 官方机器人入群事件监听已成功注册。")
+
+        pending_onebot = not self._onebot_registered and any(
+            self._is_onebot_adapter(adapter) for adapter in insts
+        )
+        pending_qq = bool(self._qq_patch_ready) and any(
+            qo_bridge is not None
+            and qo_bridge.is_qqofficial_adapter(adapter)
+            and not any(
+                client is getattr(adapter, "client", None)
+                for _, client in self._qq_clients
+            )
+            for adapter in insts
+        )
+        return not pending_onebot and not pending_qq
+
+    @staticmethod
+    def _is_onebot_adapter(adapter) -> bool:
+        """判断适配器是否为 OneBot 11（aiocqhttp）。"""
+        try:
+            return getattr(adapter.meta(), "name", "") == "aiocqhttp"
+        except Exception:
+            return False
 
     async def terminate(self):
         """插件卸载回调。"""
@@ -135,6 +225,14 @@ class GroupWelcomePlugin(Star):
                 await self._register_task
             except asyncio.CancelledError:
                 pass
+        # 移除官机回调，避免插件卸载后事件回调悬空
+        if qo_bridge is not None:
+            for adapter, _client in self._qq_clients:
+                try:
+                    qo_bridge.detach_member_handler(adapter)
+                except Exception:
+                    pass
+        self._qq_clients.clear()
         self._save_cooldowns()
         logger.info("[group_welcome] 插件已卸载，冷却数据已保存。")
 
@@ -171,22 +269,28 @@ class GroupWelcomePlugin(Star):
     # 核心逻辑
     # ──────────────────────────────────────────
 
-    def _get_client(self):
+    def _get_client(self, insts=None):
+        """返回 OneBot 11 适配器的 bot 客户端。
+
+        优先按平台名（aiocqhttp）识别，识别不到时退回鸭子类型判断，避免依赖
+        类名；只要适配器拥有 bot 对象且 bot 具备 api 属性，即视为有效客户端。
         """
-        使用鸭子类型判断适配器是否可用，
-        避免依赖类名字符串匹配导致的脆弱性。
-        只要适配器拥有 bot 对象且 bot 具备 api 属性，即视为有效客户端。
-        """
-        try:
-            for adapter in self.context.platform_manager.get_insts():
-                if (
-                    hasattr(adapter, "bot")
-                    and adapter.bot
-                    and hasattr(adapter.bot, "api")
-                ):
-                    return adapter.bot
-        except Exception as e:
-            logger.debug(f"[group_welcome] _get_client 遍历适配器异常: {e}")
+        if insts is None:
+            try:
+                insts = list(self.context.platform_manager.get_insts())
+            except Exception as e:
+                logger.debug(f"[group_welcome] _get_client 遍历适配器异常: {e}")
+                return None
+        for adapter in insts:
+            if not self._is_onebot_adapter(adapter):
+                continue
+            bot = getattr(adapter, "bot", None)
+            if bot is not None and hasattr(bot, "api"):
+                return bot
+        for adapter in insts:
+            bot = getattr(adapter, "bot", None)
+            if bot is not None and hasattr(bot, "api"):
+                return bot
         return None
 
     async def _is_self_user(self, client, user_id: str) -> bool:
@@ -213,6 +317,7 @@ class GroupWelcomePlugin(Star):
         self._save_cooldowns()
 
     async def _on_notice(self, event):
+        """OneBot 11 的 group_increase 通知。"""
         try:
             notice_type = event.get("notice_type")
             group_id = str(event.get("group_id", ""))
@@ -223,13 +328,42 @@ class GroupWelcomePlugin(Star):
         if notice_type != "group_increase" or not group_id or not user_id:
             return
 
+        await self._handle_join(group_id, user_id, platform="onebot")
+
+    async def _on_qq_member_join(self, adapter, payload: dict):
+        """QQ 官方机器人 GROUP_MEMBER_ADD 事件。"""
+        if not isinstance(payload, dict):
+            return
+        group_id = str(payload.get("group_openid") or "")
+        user_id = str(payload.get("member_openid") or "")
+        if not group_id or not user_id:
+            return
+
+        logger.debug(f"[group_welcome] 官机入群事件: group={group_id} member={user_id}")
+        await self._handle_join(
+            group_id, user_id, platform="qqofficial", adapter=adapter
+        )
+
+    async def _handle_join(
+        self, group_id: str, user_id: str, *, platform: str, adapter=None
+    ):
+        """处理一次入群：黑白名单、冷却、欢迎语与私聊群规。
+
+        Args:
+            group_id: 群号（OneBot）或群 OpenID（QQ 官方机器人）。
+            user_id: 成员 QQ 号或 OpenID。
+            platform: 平台类型，``onebot`` 或 ``qqofficial``。
+            adapter: QQ 官方适配器实例，platform 为 qqofficial 时必传。
+        """
         if not self._check_group_allowed(group_id):
             return
 
         self._clean_expired_cooldowns()
 
         key = f"{group_id}:{user_id}"
-        cooldown = self._get_resolved_config(group_id, "cooldown_seconds", self.config.get("cooldown_seconds", 300))
+        cooldown = self._get_resolved_config(
+            group_id, "cooldown_seconds", self.config.get("cooldown_seconds", 300)
+        )
 
         async with self._lock:
             now = time.time()
@@ -237,20 +371,33 @@ class GroupWelcomePlugin(Star):
                 return
             self._global_cooldown[key] = now
 
-        client = self._get_client()
-        if not client:
-            return
+        client = None
+        if platform == "onebot":
+            client = self._get_client()
+            if not client:
+                return
 
-        # 【Fix #3】机器人自己入群时不欢迎自己
-        if await self._is_self_user(client, user_id):
-            logger.info(f"[group_welcome] 检测到机器人自身 ({user_id}) 入群，跳过欢迎。")
-            return
+            # 【Fix #3】机器人自己入群时不欢迎自己
+            if await self._is_self_user(client, user_id):
+                logger.info(
+                    f"[group_welcome] 检测到机器人自身 ({user_id}) 入群，跳过欢迎。"
+                )
+                return
 
-        name = await self._get_member_name(client, group_id, user_id)
+            name = await self._get_member_name(client, group_id, user_id)
+        else:
+            name = await qo_bridge.get_member_name(
+                adapter, group_id, user_id, fallback=self._fallback_member_name
+            )
 
         count_text = ""
-        if self._get_resolved_config(group_id, "enable_member_count", self._enable_member_count):
-            count = await self._get_group_member_count(client, group_id)
+        if self._get_resolved_config(
+            group_id, "enable_member_count", self._enable_member_count
+        ):
+            if platform == "onebot":
+                count = await self._get_group_member_count(client, group_id)
+            else:
+                count = await qo_bridge.get_group_member_count(adapter, group_id)
             if count:
                 count_text = f"\n你是当前群里第 {count} 位成员！"
 
@@ -263,16 +410,39 @@ class GroupWelcomePlugin(Star):
             logger.warning(f"[group_welcome] 群 {group_id} 欢迎语模板格式错误: {e}")
             welcome_text = f"🎉 欢迎 {name} 加入本群！{count_text}"
 
-        if self._get_resolved_config(group_id, "enable_ai_welcome", self._enable_ai_welcome):
+        if self._get_resolved_config(
+            group_id, "enable_ai_welcome", self._enable_ai_welcome
+        ):
             ai_text = await self._gen_ai_welcome(group_id, name)
             if ai_text:
                 welcome_text += f"\n\n✨ {ai_text}"
 
-        await self._send_group_welcome(client, group_id, user_id, welcome_text)
+        image_url = self._pick_image_url(group_id)
+        if platform == "onebot":
+            await self._send_group_welcome(
+                client, group_id, user_id, welcome_text, image_url
+            )
+        else:
+            await qo_bridge.send_group_welcome(
+                self.context, adapter, group_id, user_id, welcome_text, image_url
+            )
 
-        if self._get_resolved_config(group_id, "enable_private_rules", self._enable_private_rules):
-            rules = self._get_resolved_config(group_id, "group_rules", self.config.get("group_rules", "📋 请遵守群规，友善交流！"))
-            await self._send_private_rules(client, user_id, rules)
+        if self._get_resolved_config(
+            group_id, "enable_private_rules", self._enable_private_rules
+        ):
+            rules = self._get_resolved_config(
+                group_id,
+                "group_rules",
+                self.config.get("group_rules", "📋 请遵守群规，友善交流！"),
+            )
+            if platform == "onebot":
+                await self._send_private_rules(client, user_id, rules)
+            else:
+                # 官机私聊为主动消息，稍作延迟避免与群消息挤在一起
+                await asyncio.sleep(2)
+                await qo_bridge.send_private_rules(
+                    self.context, adapter, user_id, rules
+                )
 
     def _check_group_allowed(self, group_id: str) -> bool:
         if self._whitelist:
@@ -346,7 +516,15 @@ class GroupWelcomePlugin(Star):
         except Exception:
             return None
 
-    async def _send_group_welcome(self, client, group_id: str, user_id: str, text: str):
+    async def _send_group_welcome(
+        self,
+        client,
+        group_id: str,
+        user_id: str,
+        text: str,
+        image_url: str = "",
+    ):
+        """OneBot 11：发送 @成员 + 欢迎语 + 可选图片。"""
         try:
             if not group_id.isdigit() or not user_id.isdigit():
                 return
@@ -354,9 +532,7 @@ class GroupWelcomePlugin(Star):
                 {"type": "at", "data": {"qq": user_id}},
                 {"type": "text", "data": {"text": f" {text}"}},
             ]
-            image_urls = self._get_resolved_image_urls(group_id)
-            if image_urls:
-                image_url = random.choice(image_urls)
+            if image_url:
                 message.append({"type": "image", "data": {"file": image_url}})
                 logger.debug(f"[group_welcome] 已随机附加欢迎图片: {image_url}")
             await client.api.call_action(
@@ -364,6 +540,11 @@ class GroupWelcomePlugin(Star):
             )
         except Exception as e:
             logger.error(f"[group_welcome] 发送欢迎语异常: {e}")
+
+    def _pick_image_url(self, group_id: str) -> str:
+        """从欢迎图片池随机取一张；未配置时返回空字符串。"""
+        image_urls = self._get_resolved_image_urls(group_id)
+        return random.choice(image_urls) if image_urls else ""
 
     def _get_resolved_image_urls(self, group_id: str) -> list:
         """获取当前群欢迎图片池。模板优先，否则用全局配置。兼容旧版字符串配置。"""
@@ -605,14 +786,7 @@ class GroupWelcomePlugin(Star):
             sub_parts = text.split(maxsplit=1)
             first_word = sub_parts[0] if sub_parts else ""
 
-            if first_word.isdigit():
-                target_group_id = first_word
-                remaining = sub_parts[1].strip() if len(sub_parts) > 1 else ""
-                if remaining in ["reset", "show"]:
-                    op_type = remaining
-                else:
-                    final_content = remaining
-            elif first_word in ["reset", "show"]:
+            if first_word in ["reset", "show"]:
                 op_type = first_word
                 if len(sub_parts) < 2:
                     yield event.plain_result(
@@ -620,9 +794,17 @@ class GroupWelcomePlugin(Star):
                     )
                     return
                 target_group_id = sub_parts[1].strip()
-                if not target_group_id.isdigit():
-                    yield event.plain_result(f"❌ 群号格式错误：{target_group_id}")
+                if not target_group_id:
+                    yield event.plain_result("❌ 群号不能为空。")
                     return
+            elif first_word:
+                # 群号（OneBot）或群 OpenID（QQ 官方机器人）都允许
+                target_group_id = first_word
+                remaining = sub_parts[1].strip() if len(sub_parts) > 1 else ""
+                if remaining in ["reset", "show"]:
+                    op_type = remaining
+                else:
+                    final_content = remaining
             else:
                 yield event.plain_result("❌ 私聊模式请先写群号或操作(reset/show)。")
                 return
@@ -723,6 +905,7 @@ class GroupWelcomePlugin(Star):
 
         result = f"""📊 group_welcome 插件状态
 {"─" * 24}
+群标识：{query_gid or "（未指定）"}
 名单模式：{"白名单模式" if self._whitelist else "黑名单模式"}
 白名单：{wl}
 黑名单：{bl}

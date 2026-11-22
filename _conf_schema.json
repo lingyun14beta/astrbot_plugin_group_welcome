@@ -7,13 +7,13 @@
   },
   "group_whitelist": {
     "description": "✅ 白名单群号",
-    "hint": "【白名单模式】填写后，只有这些群会触发欢迎。",
+    "hint": "【白名单模式】填写后，只有这些群会触发欢迎。QQ 官方机器人请填 group_openid（群内发送 /welcome status 可查看）。",
     "type": "list",
     "default": []
   },
   "group_blacklist": {
     "description": "🚫 黑名单群号",
-    "hint": "【黑名单模式】只有当白名单为空时生效。",
+    "hint": "【黑名单模式】只有当白名单为空时生效。QQ 官方机器人请填 group_openid。",
     "type": "list",
     "default": []
   },
@@ -28,7 +28,7 @@
         "items": {
           "group_ids": {
             "description": "适用群号",
-            "hint": "填写要套用该模板的群号。",
+            "hint": "填写要套用该模板的群号；QQ 官方机器人填 group_openid。",
             "type": "list",
             "default": []
           },
@@ -156,5 +156,17 @@
     "hint": "⚠️ 请在群内使用 /welcome set 指令进行配置。",
     "type": "text",
     "default": "{}"
+  },
+  "enable_qqofficial": {
+    "description": "🛰️ QQ 官方机器人支持",
+    "hint": "启用后自动为 QQ 官方机器人补充入群事件监听。修改后需重启 AstrBot 生效；若机器人连接异常可关闭此项。",
+    "type": "bool",
+    "default": true
+  },
+  "fallback_member_name": {
+    "description": "🏷️ 官机昵称占位",
+    "hint": "QQ 官方机器人拿不到新成员昵称时使用的称呼，仅官机场景生效。",
+    "type": "text",
+    "default": "新朋友"
   }
 }
