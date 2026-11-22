@@ -55,6 +55,11 @@ _MEMBER_NAME_TTL_HIT = 3600.0
 _MEMBER_NAME_TTL_MISS = 600.0
 _MEMBER_NAME_CACHE_MAX = 2048
 
+# 成员信息接口属于内邀能力；判定无权限后短时间内不再请求，避免刷日志。
+_name_api_blocked_until = 0.0
+_NAME_API_BLOCK_SECONDS = 600.0
+_name_api_permission_warned = False
+
 # 群人数缓存，减少 /v2/groups/{openid}/info 的调用次数。
 _member_count_cache: dict[str, tuple[float, int]] = {}
 _MEMBER_COUNT_TTL = 120.0
@@ -324,6 +329,21 @@ async def send_private_rules(
         logger.warning(f"[group_welcome] 官机私聊群规发送失败: {exc}")
 
 
+def _is_permission_error(message: str) -> bool:
+    """判断接口错误是否为「应用无接口访问权限」这类权限问题。
+
+    Args:
+        message: 接口异常文本。
+
+    Returns:
+        属于权限类错误返回 True。
+    """
+    lowered = message.lower()
+    if "无接口访问权限" in message or "无权限" in message:
+        return True
+    return any(keyword in lowered for keyword in ("permission", "forbidden", "403"))
+
+
 async def get_member_name(
     adapter: Any,
     group_id: str,
@@ -333,7 +353,8 @@ async def get_member_name(
     """查询群成员昵称，失败时回退到占位称呼。
 
     官方群成员信息接口（``/v2/groups/{group_id}/members/{user_id}``）返回
-    ``username``，但该能力仍在灰度开放，取不到时直接使用 ``fallback``。
+    ``username``，但该能力仍在灰度开放。未开通时接口返回「应用无接口访问
+    权限」，此时会暂停请求一段时间并直接使用 ``fallback``。
 
     Args:
         adapter: QQ 官方适配器实例。
@@ -344,11 +365,15 @@ async def get_member_name(
     Returns:
         成员昵称或占位称呼。
     """
+    global _name_api_blocked_until, _name_api_permission_warned
+
     key = (group_id, user_id)
     now = time.time()
     cached = _member_name_cache.get(key)
     if cached and cached[0] > now:
         return cached[1]
+    if now < _name_api_blocked_until:
+        return fallback
 
     name = ""
     try:
@@ -364,7 +389,16 @@ async def get_member_name(
         if isinstance(response, dict):
             name = str(response.get("username") or "").strip()
     except Exception as exc:
-        logger.debug(f"[group_welcome] 获取官机成员昵称失败: {exc}")
+        if _is_permission_error(str(exc)):
+            _name_api_blocked_until = now + _NAME_API_BLOCK_SECONDS
+            if not _name_api_permission_warned:
+                _name_api_permission_warned = True
+                logger.warning(
+                    "[group_welcome] QQ 官方群成员信息接口未开通权限（内邀能力），"
+                    "欢迎语暂用占位昵称；申请到权限后会自动生效。"
+                )
+        else:
+            logger.debug(f"[group_welcome] 获取官机成员昵称失败: {exc}")
 
     if name:
         _member_name_cache[key] = (now + _MEMBER_NAME_TTL_HIT, name)
