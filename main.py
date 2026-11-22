@@ -88,6 +88,7 @@ class GroupWelcomePlugin(Star):
         self._onebot_registered = False
         self._qq_clients: list = []
         self._qq_patch_ready = False
+        self._qq_version_checked = False
         if self._enable_qqofficial and qo_bridge is not None:
             # 必须在平台适配器建立连接之前安装补丁，插件初始化早于平台初始化。
             self._qq_patch_ready = qo_bridge.patch_botpy_for_member_event()
@@ -103,9 +104,6 @@ class GroupWelcomePlugin(Star):
                     )
                 else:
                     logger.info("[group_welcome] 已启用 QQ 官方机器人入群事件支持。")
-                version_warning = qo_bridge.check_astrbot_version()
-                if version_warning:
-                    logger.warning(f"[group_welcome] {version_warning}")
 
         self._whitelist: set = _parse_id_list(config.get("group_whitelist", []))
         self._blacklist: set = _parse_id_list(config.get("group_blacklist", []))
@@ -186,6 +184,13 @@ class GroupWelcomePlugin(Star):
                     continue
                 if any(existing is client for _, existing in self._qq_clients):
                     continue
+
+                # 只在真正接入官机时校验版本，避免纯 OneBot 部署被误告警。
+                if not self._qq_version_checked:
+                    self._qq_version_checked = True
+                    version_warning = qo_bridge.check_astrbot_version()
+                    if version_warning:
+                        logger.warning(f"[group_welcome] {version_warning}")
 
                 async def _qq_member_handler(payload, _adapter=adapter):
                     if not self._is_running:
