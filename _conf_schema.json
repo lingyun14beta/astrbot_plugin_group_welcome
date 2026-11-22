@@ -145,6 +145,18 @@
     "type": "list",
     "default": []
   },
+  "image_download_guard": {
+    "description": "🛡️ 图片下载安全校验",
+    "hint": "发送前预检图片地址：拒绝内网 / 环回 / 云元数据地址、非 http(s) 协议、超大或非图片内容，防止 SSRF。关闭后不再预检。",
+    "type": "bool",
+    "default": true
+  },
+  "image_max_size_mb": {
+    "description": "📏 图片体积上限 (MB)",
+    "hint": "超过该大小的欢迎图片会被跳过；QQ 富媒体通常限制 10MB。",
+    "type": "int",
+    "default": 10
+  },
   "cooldown_seconds": {
     "description": "⏱️ 防刷屏冷却 (秒)",
     "hint": "同一用户重复进群触发欢迎的最小间隔时间",

@@ -3,6 +3,8 @@ import re
 import time
 import random
 import asyncio
+from pathlib import Path
+
 from astrbot.api.event import filter, AstrMessageEvent
 from astrbot.api.star import Context, Star, StarTools
 from astrbot.api import logger, AstrBotConfig
@@ -11,6 +13,11 @@ try:
     from . import qqofficial_bridge as qo_bridge
 except ImportError:  # pragma: no cover - 插件以非包形式加载时降级为仅 OneBot
     qo_bridge = None
+
+try:
+    from . import image_guard
+except ImportError:  # pragma: no cover - 缺少图片校验模块时不做预检
+    image_guard = None
 
 
 def _parse_id_list(value) -> set:
@@ -155,6 +162,17 @@ class GroupWelcomePlugin(Star):
         self._enable_ai_welcome: bool = config.get("enable_ai_welcome", False)
         self._ai_retry_count: int = config.get("ai_retry_count", 0)
         self._welcome_image_url: str | list = config.get("welcome_image_url", "")
+
+        # 图片下载安全：发送前预检内网地址 / 协议 / 体积
+        self._image_guard_enabled: bool = bool(
+            config.get("image_download_guard", True)
+        )
+        try:
+            self._image_max_bytes: int = max(
+                1, int(config.get("image_max_size_mb", 10))
+            ) * 1024 * 1024
+        except (TypeError, ValueError):
+            self._image_max_bytes = 10 * 1024 * 1024
 
         # QQ 官方机器人（官机）支持
         self._enable_qqofficial: bool = bool(config.get("enable_qqofficial", True))
@@ -558,7 +576,7 @@ class GroupWelcomePlugin(Star):
             if ai_text:
                 welcome_text += f"\n\n✨ {ai_text}"
 
-        image_url = self._pick_image_url(group_id)
+        image_url = await self._pick_image_url(group_id)
         if platform == "onebot":
             await self._send_group_welcome(
                 client, group_id, user_id, welcome_text, image_url
@@ -688,10 +706,37 @@ class GroupWelcomePlugin(Star):
         except Exception as e:
             logger.error(f"[group_welcome] 发送欢迎语异常: {e}")
 
-    def _pick_image_url(self, group_id: str) -> str:
-        """从欢迎图片池随机取一张；未配置时返回空字符串。"""
+    async def _pick_image_url(self, group_id: str) -> str:
+        """从欢迎图片池随机取一张，并做下载安全预检。
+
+        预检会拦截内网 / 环回 / 元数据地址、非 http(s) 协议、超大文件与
+        非图片内容；被拦截的图片会被跳过并尝试下一张。
+
+        Args:
+            group_id: 群号或群 OpenID。
+
+        Returns:
+            可安全使用的图片地址；没有可用图片时返回空字符串。
+        """
         image_urls = self._get_resolved_image_urls(group_id)
-        return random.choice(image_urls) if image_urls else ""
+        if not image_urls:
+            return ""
+        random.shuffle(image_urls)
+        if image_guard is None:
+            return image_urls[0]
+
+        for image_url in image_urls:
+            ok, reason, resolved = await image_guard.check_image_source(
+                image_url,
+                max_bytes=self._image_max_bytes,
+                enabled=self._image_guard_enabled,
+            )
+            if ok:
+                return resolved
+            logger.warning(
+                f"[group_welcome] 跳过不可用的欢迎图片 {image_url}: {reason}"
+            )
+        return ""
 
     def _get_resolved_image_urls(self, group_id: str) -> list:
         """获取当前群欢迎图片池。模板优先，否则用全局配置。兼容旧版字符串配置。"""
@@ -710,6 +755,9 @@ class GroupWelcomePlugin(Star):
         """对格式可疑的图片 URL 记录警告，便于排查。"""
         try:
             if not image_url.lower().startswith(("http://", "https://", "file:///")):
+                if Path(image_url).is_file():
+                    # 裸本地路径同样受支持，不误报
+                    return
                 logger.warning(
                     f"[group_welcome] 欢迎图片 URL 格式可能无效: {image_url}"
                 )
