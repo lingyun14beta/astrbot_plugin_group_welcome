@@ -103,6 +103,9 @@ class GroupWelcomePlugin(Star):
                     )
                 else:
                     logger.info("[group_welcome] 已启用 QQ 官方机器人入群事件支持。")
+                version_warning = qo_bridge.check_astrbot_version()
+                if version_warning:
+                    logger.warning(f"[group_welcome] {version_warning}")
 
         self._whitelist: set = _parse_id_list(config.get("group_whitelist", []))
         self._blacklist: set = _parse_id_list(config.get("group_blacklist", []))

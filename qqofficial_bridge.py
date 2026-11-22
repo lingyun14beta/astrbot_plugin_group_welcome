@@ -17,6 +17,7 @@ AstrBot 的 QQ 官方适配器只把「消息」转换成 AstrBot 事件，官�
 
 from __future__ import annotations
 
+import re
 import time
 from typing import Any
 
@@ -40,6 +41,13 @@ DEFAULT_FALLBACK_NAME = "新朋友"
 """官方接口取不到昵称时使用的占位称呼。"""
 
 _INTENTS_PATCH_FLAG = "_group_welcome_member_intent_patched"
+
+MIN_ASTRBOT_VERSION = (4, 29, 0)
+"""官机适配依赖的 AstrBot 最低版本。
+
+低于该版本时：群主动消息路径缺失（适配器要求 msg_id，会静默跳过）、主动消息
+不走 Markdown、或 At 组件不会转换成 ``<qqbot-at-user>``。
+"""
 
 # 昵称成功/失败分别缓存，避免每次入群都打接口（成员信息接口还在内邀阶段）。
 _member_name_cache: dict[tuple[str, str], tuple[float, str]] = {}
@@ -66,6 +74,46 @@ def is_qqofficial_adapter(adapter: Any) -> bool:
     except Exception:
         return False
     return getattr(meta, "name", "") in QQOFFICIAL_PLATFORM_NAMES
+
+
+def _version_tuple(value: str) -> tuple[int, ...]:
+    """把版本字符串转换成可比较的数字元组。
+
+    Args:
+        value: 形如 ``4.29.0`` / ``4.30.0-beta.1`` 的版本号。
+
+    Returns:
+        最多三段的数字元组；无法解析时返回空元组。
+    """
+    return tuple(int(part) for part in re.findall(r"\d+", value or "")[:3])
+
+
+def check_astrbot_version() -> str:
+    """检查 AstrBot 版本是否满足官机适配要求。
+
+    官机链路依赖 AstrBot 4.29.0 起才完整的能力：群主动消息、主动消息走
+    Markdown、``At`` 组件转换为 ``<qqbot-at-user>``。低于该版本时插件不会崩溃，
+    但欢迎语可能发不出去或丢失 @ / 图片，因此启动时给出显式告警。
+
+    Returns:
+        版本过低时返回告警文案；满足要求或取不到版本时返回空字符串。
+    """
+    try:
+        import astrbot
+
+        version = str(getattr(astrbot, "__version__", "") or "")
+    except Exception:
+        return ""
+
+    current = _version_tuple(version)
+    if not current or current >= MIN_ASTRBOT_VERSION:
+        return ""
+
+    required = ".".join(str(part) for part in MIN_ASTRBOT_VERSION)
+    return (
+        f"当前 AstrBot {version} 低于官机适配所需的最低版本 v{required}："
+        "群主动消息可能被适配器静默跳过，或 @ / 图片退化为纯文本，建议升级。"
+    )
 
 
 def patch_botpy_for_member_event() -> bool:
